@@ -58,8 +58,11 @@ def _humanize_tool(tool_name: str, tool_input: Any) -> str:
 
     detail = ""
     if tool_name in ("shell", "Bash"):
+        # Show the whole command (truncated below) — splitting at &&/| hid
+        # the actual work after a leading `cd`, so the user saw "cd" for
+        # several minutes while a test suite was running.
         cmd = inp.get("command", inp.get("cmd", ""))
-        detail = cmd.split("&&")[0].split("|")[0].strip()
+        detail = " ".join(cmd.split())
     elif tool_name in ("file_read", "file_write", "file_edit", "Read", "Write", "Edit"):
         path = inp.get("file_path", inp.get("path", ""))
         if path:

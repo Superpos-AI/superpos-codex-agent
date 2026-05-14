@@ -698,3 +698,137 @@ def _make_async_lines(json_events):
     import json
     lines = [json.dumps(e).encode() + b"\n" for e in json_events]
     return _AsyncLineIter(lines)
+
+
+# --- Recent-tasks bridge from Superpos → Telegram ---
+
+async def test_telegram_request_sees_recent_superpos_task_in_prompt(
+    executor, mock_config
+):
+    """A Telegram message arriving after a Superpos task completed in the
+    same chat must see the task's summary appended to the prompt so the
+    user can ask follow-up questions about notifications they saw."""
+    from src.recent_tasks import TaskSummary
+
+    mock_config.codex_worktree_isolation = False
+    mock_config.codex_working_dir = "/workspace"
+    mock_config.openai_api_key = ""
+
+    executor._recent_tasks.record(
+        "chat-77",
+        TaskSummary(
+            task_id="sp-task-99",
+            description="Deploy frontend to staging",
+            outcome="failed",
+            detail="kubectl timeout after 60s",
+        ),
+    )
+
+    req = ExecutionRequest(
+        prompt="what went wrong with the deploy?",
+        chat_id="chat-77",
+        source="telegram",
+    )
+
+    captured_cmds = []
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines([])
+    mock_process.stderr = AsyncMock()
+    mock_process.stderr.read = AsyncMock(return_value=b"")
+    mock_process.wait = AsyncMock(return_value=None)
+    mock_process.returncode = 0
+
+    async def capture_exec(*args, **kwargs):
+        captured_cmds.append(args)
+        return mock_process
+
+    with patch("src.codex_executor.is_git_repo", return_value=False), \
+         patch("asyncio.create_subprocess_exec", side_effect=capture_exec), \
+         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+        streamer = MockStreamer.return_value
+        streamer.finish = AsyncMock()
+        await executor._execute_inner(req, streamer, retries=1)
+
+    prompt_arg = list(captured_cmds[0])[-1]
+    assert "sp-task-99" in prompt_arg
+    assert "Deploy frontend to staging" in prompt_arg
+    assert "kubectl timeout" in prompt_arg
+    assert "failed" in prompt_arg
+
+
+async def test_superpos_task_completion_records_summary(
+    executor, mock_superpos, mock_config
+):
+    """A successfully completed Superpos task must land in the recent-tasks
+    log so the next Telegram message in the same chat picks it up."""
+    mock_config.codex_worktree_isolation = False
+    mock_config.codex_working_dir = "/workspace"
+    mock_config.openai_api_key = ""
+
+    req = ExecutionRequest(
+        prompt="build the report", chat_id="chat-77", source="superpos",
+        superpos_task_id="sp-task-record",
+    )
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines([
+        {"type": "response.output_text.delta", "delta": "Report generated."},
+    ])
+    mock_process.stderr = AsyncMock()
+    mock_process.stderr.read = AsyncMock(return_value=b"")
+    mock_process.wait = AsyncMock(return_value=None)
+    mock_process.returncode = 0
+
+    with patch("src.codex_executor.is_git_repo", return_value=False), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+        streamer = MockStreamer.return_value
+        streamer.finish = AsyncMock()
+        streamer.append = AsyncMock()
+        streamer.send_tool_notification = AsyncMock()
+        await executor._execute_inner(req, streamer, retries=1)
+
+    rendered = executor._recent_tasks.render("chat-77")
+    assert rendered is not None
+    assert "sp-task-record" in rendered
+    assert "succeeded" in rendered
+    assert "build the report" in rendered
+
+
+async def test_superpos_task_failure_records_summary(
+    executor, mock_superpos, mock_config
+):
+    """Failures must also land in the recent-tasks log — the user often
+    asks follow-up questions about what went wrong."""
+    mock_config.codex_worktree_isolation = False
+    mock_config.codex_working_dir = "/workspace"
+    mock_config.openai_api_key = ""
+
+    req = ExecutionRequest(
+        prompt="risky operation", chat_id="chat-77", source="superpos",
+        superpos_task_id="sp-task-fail",
+    )
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines([])
+    mock_process.stderr = AsyncMock()
+    mock_process.stderr.read = AsyncMock(return_value=b"boom: simulated failure")
+    mock_process.wait = AsyncMock(return_value=None)
+    mock_process.returncode = 1
+
+    with patch("src.codex_executor.is_git_repo", return_value=False), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process), \
+         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+        streamer = MockStreamer.return_value
+        streamer.finish = AsyncMock()
+        streamer.append = AsyncMock()
+        streamer.error = AsyncMock()
+        streamer.send_tool_notification = AsyncMock()
+        await executor._execute_inner(req, streamer, retries=1)
+
+    rendered = executor._recent_tasks.render("chat-77")
+    assert rendered is not None
+    assert "sp-task-fail" in rendered
+    assert "failed" in rendered
+    assert "simulated failure" in rendered
