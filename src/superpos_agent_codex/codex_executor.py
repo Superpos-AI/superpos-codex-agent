@@ -1,4 +1,11 @@
-"""Queue-based worker that invokes OpenAI Codex CLI and routes output."""
+"""Queue-based worker that invokes OpenAI Codex CLI and routes output.
+
+This is Codex's concrete :class:`superpos_agent_core.Executor` subclass.  Core
+modules (``superpos_poller``, ``telegram_bot``, ``run_agent``) drive every
+agent through the abstract Executor surface; the Codex-specific bits live
+here: subprocess management, JSONL stream parsing, persona injection via
+AGENTS.md, codex MCP config materialization.
+"""
 
 from __future__ import annotations
 
@@ -6,99 +13,91 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
 from asyncio.subprocess import PIPE
-from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from .superpos_client import SuperposClient
-from .config import Config
-from .module_loader import collect_mcp_servers, discover_modules
-from .runtime_config import RuntimeConfig
-from .session_store import SessionStore
-from .telegram_gateway import TelegramGateway
-from .telegram_streamer import TelegramStreamer
-from .worktree_manager import ensure_worktree, is_git_repo, worktree_path
+from superpos_agent_core import (
+    ExecutionRequest,
+    Executor,
+    SessionStore,
+    SuperposClient,
+    TelegramGateway,
+    TelegramStreamer,
+    collect_mcp_servers,
+    discover_modules,
+    ensure_worktree,
+    is_git_repo,
+    worktree_path,
+)
+
+from .config import CodexConfig
+from .runtime_config import CodexRuntimeConfig
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class ExecutionRequest:
-    prompt: str
-    chat_id: int | str
-    source: str  # "telegram" | "superpos"
-    superpos_task_id: str | None = None
-    branch: str | None = None
-    image_paths: list[str] | None = None
+# Cap prompt size — the CLI passes it as a positional arg, which must fit in
+# ARG_MAX (~2MB, often less in containers).
+_MAX_PROMPT = 500_000  # 500KB safe limit
+
+_PERSONA_BEGIN = "<!-- PERSONA:BEGIN -->"
+_PERSONA_END = "<!-- PERSONA:END -->"
 
 
-_modules = discover_modules()
-_mcp = collect_mcp_servers(_modules)
+class CodexExecutor(Executor):
+    """Concrete executor that drives OpenAI's Codex CLI via subprocess."""
 
-
-def _write_mcp_config(mcp_servers: dict) -> None:
-    """Write MCP server configuration to ~/.codex/config.json."""
-    config_path = Path.home() / ".codex" / "config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = {}
-    if config_path.exists():
-        try:
-            existing = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    existing["mcpServers"] = mcp_servers
-    config_path.write_text(json.dumps(existing, indent=2))
-
-
-# Write MCP config at import time if any modules define MCP servers
-if _mcp:
-    _write_mcp_config(_mcp)
-
-
-class CodexExecutor:
     def __init__(
         self,
-        config: Config,
-        runtime: RuntimeConfig,
+        config: CodexConfig,
+        runtime: CodexRuntimeConfig,
         superpos: SuperposClient | None,
         gateway: TelegramGateway | None,
         persona: str | None = None,
     ) -> None:
+        super().__init__(max_parallel=config.executor_max_parallel)
         self._config = config
         self._runtime = runtime
         self._superpos = superpos
         self._gateway = gateway
         self._persona = persona
-        self._inject_persona_into_agents_md()
-        self._sessions = SessionStore()
-        self.queue: asyncio.Queue[ExecutionRequest] = asyncio.Queue()
-        self._in_flight_superpos_tasks: set[str] = set()
-        self._semaphore = asyncio.Semaphore(config.codex_max_parallel)
+        self._sessions = SessionStore(
+            path=os.path.join(config.home_dir, "session_store.json"),
+        )
+        self._semaphore = asyncio.Semaphore(config.executor_max_parallel)
         self._worktree_locks: dict[str, asyncio.Lock] = {}
-        self._active_count: int = 0
+
+        modules = discover_modules(config.modules_dir)
+        mcp = collect_mcp_servers(modules)
+        if mcp:
+            log.info("Loaded %d MCP server(s) from %s", len(mcp), config.modules_dir)
+            self._write_mcp_config(mcp)
+
+        self._inject_persona_into_agents_md()
+
+    # ── Persona injection (Codex-specific: via AGENTS.md, not CLI flags) ─────
 
     def _inject_persona_into_agents_md(self) -> None:
         """Prepend persona to AGENTS.md so Codex picks it up as system prompt."""
         if not self._persona:
             return
-        agents_md = os.path.join(self._config.codex_working_dir, "AGENTS.md")
+        agents_md = os.path.join(self._config.executor_working_dir, "AGENTS.md")
         existing = ""
         if os.path.exists(agents_md):
             with open(agents_md, "r") as f:
                 existing = f.read()
         persona_block = (
-            "<!-- PERSONA:BEGIN -->\n"
+            f"{_PERSONA_BEGIN}\n"
             f"{self._persona}\n"
-            "<!-- PERSONA:END -->\n\n"
+            f"{_PERSONA_END}\n\n"
         )
-        # Replace existing persona block or prepend
-        if "<!-- PERSONA:BEGIN -->" in existing:
-            import re
+        if _PERSONA_BEGIN in existing:
             existing = re.sub(
                 r"<!-- PERSONA:BEGIN -->.*?<!-- PERSONA:END -->\n*",
                 persona_block,
@@ -112,43 +111,177 @@ class CodexExecutor:
                 f.write(persona_block + existing)
         log.info("Injected persona into %s", agents_md)
 
-    def update_persona(self, prompt: str | None) -> None:
-        """Update the persona and re-inject into AGENTS.md."""
+    @staticmethod
+    def _write_mcp_config(mcp_servers: dict) -> None:
+        """Write MCP server configuration to ~/.codex/config.json."""
+        config_path = Path.home() / ".codex" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict = {}
+        if config_path.exists():
+            try:
+                existing = json.loads(config_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing["mcpServers"] = mcp_servers
+        config_path.write_text(json.dumps(existing, indent=2))
+
+    # ── Abstract method impls ──────────────────────────────────────────────
+
+    def update_persona(self, prompt: str | None, version: int | None = None) -> None:
+        """Replace the persona and re-inject into AGENTS.md.
+
+        ``version`` is accepted for API compatibility with the core poller,
+        but Codex doesn't track persona versions — each execution re-reads
+        AGENTS.md, so a fresh persona takes effect on the next message
+        without needing to invalidate sessions.
+        """
         self._persona = prompt
         self._inject_persona_into_agents_md()
-
-    @property
-    def pending(self) -> int:
-        return self.queue.qsize()
-
-    @property
-    def is_busy(self) -> bool:
-        """True if any task is currently executing."""
-        return self._active_count > 0
-
-    @property
-    def has_free_slots(self) -> bool:
-        """True if the executor can accept more concurrent tasks.
-
-        Uses the in-flight task set (populated at claim time, cleared after
-        execution) to accurately count tasks that are queued, waiting for
-        the semaphore, OR actively executing.  ``queue.qsize()`` and
-        ``_active_count`` both miss the semaphore-waiting gap.
-        """
-        return len(self._in_flight_superpos_tasks) < self._config.codex_max_parallel
-
-    def add_superpos_task(self, task_id: str) -> None:
-        self._in_flight_superpos_tasks.add(task_id)
-
-    def remove_superpos_task(self, task_id: str) -> None:
-        self._in_flight_superpos_tasks.discard(task_id)
-
-    def has_superpos_task(self, task_id: str) -> bool:
-        return task_id in self._in_flight_superpos_tasks
 
     def clear_session(self, chat_id: int | str) -> None:
         """Clear the stored session for a chat, starting fresh next message."""
         self._sessions.clear(chat_id)
+
+    async def run(self) -> None:
+        log.info(
+            "Codex executor started (max_parallel=%d)",
+            self._config.executor_max_parallel,
+        )
+        while True:
+            req = await self.queue.get()
+            asyncio.create_task(self._run_one(req))
+
+    # ── Optional hooks ─────────────────────────────────────────────────────
+
+    async def preflight(self) -> None:
+        """Verify Codex CLI auth by making a minimal call.
+
+        Core's ``run_agent`` marks the agent ``online`` in Superpos *before*
+        invoking preflight.  If we exit here on bad credentials, the
+        asyncio.gather() ``finally`` that flips status back to ``offline``
+        never runs, and Superpos keeps advertising us as online until the
+        heartbeat timeout fires.  Flip offline ourselves on any preflight
+        failure as a best-effort guard.
+        """
+        log.info("Verifying Codex authentication...")
+        try:
+            env = {**os.environ}
+            process = await asyncio.create_subprocess_exec(
+                "codex", "exec", "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "hi",
+                stdout=PIPE,
+                stderr=PIPE,
+                env=env,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=60,
+                )
+            except asyncio.TimeoutError:
+                log.warning("Codex auth check timed out (60s) — proceeding anyway")
+                return
+            if process.returncode != 0:
+                stderr_str = stderr.decode(errors="replace")
+                if _is_auth_error(stderr_str):
+                    await self._mark_offline_best_effort()
+                    print(_AUTH_HELP_INVALID_KEY, file=sys.stderr)
+                    sys.exit(1)
+                raise RuntimeError(
+                    f"Codex auth check failed (exit {process.returncode}): "
+                    f"{stderr_str[:500]}"
+                )
+            log.info("Codex authentication OK")
+        except FileNotFoundError:
+            await self._mark_offline_best_effort()
+            log.critical(
+                "'codex' CLI not found on PATH. Install with: "
+                "npm install -g @openai/codex"
+            )
+            sys.exit(1)
+
+    async def _mark_offline_best_effort(self) -> None:
+        if not self._superpos:
+            return
+        try:
+            await self._superpos.update_status("offline")
+            log.info("Agent status set to offline (preflight failure)")
+        except Exception:
+            log.debug(
+                "Failed to flip status offline during preflight cleanup",
+                exc_info=True,
+            )
+
+    def cleanup_stale_sessions(self, max_age_hours: int = 24) -> dict[str, int]:
+        """Remove old Codex session data while preserving active resumes."""
+        counts = {"projects": 0, "session_env": 0, "bytes_freed": 0}
+        cutoff = time.time() - (max_age_hours * 3600)
+        preserve: set[str] = self._sessions.active_session_ids()
+
+        codex_dir = os.path.join(os.environ.get("HOME", "/tmp"), ".codex")
+
+        def _session_id_from_name(name: str) -> str:
+            return name[:-6] if name.endswith(".jsonl") else name
+
+        # Codex CLI writes sessions under projects/<encoded-cwd>/<sid>/ —
+        # scan every project dir so worktree-scoped sessions get cleaned too.
+        projects_root = os.path.join(codex_dir, "projects")
+        if os.path.isdir(projects_root):
+            for project_name in os.listdir(projects_root):
+                projects_dir = os.path.join(projects_root, project_name)
+                if not os.path.isdir(projects_dir):
+                    continue
+                for name in os.listdir(projects_dir):
+                    path = os.path.join(projects_dir, name)
+                    if not os.path.isdir(path):
+                        continue
+                    if _session_id_from_name(name) in preserve:
+                        continue
+                    try:
+                        mtime = os.path.getmtime(path)
+                        if mtime < cutoff:
+                            size = sum(
+                                os.path.getsize(os.path.join(dp, f))
+                                for dp, _, fns in os.walk(path)
+                                for f in fns
+                            )
+                            shutil.rmtree(path)
+                            counts["projects"] += 1
+                            counts["bytes_freed"] += size
+                    except OSError:
+                        pass
+
+        session_env_dir = os.path.join(codex_dir, "session-env")
+        if os.path.isdir(session_env_dir):
+            for name in os.listdir(session_env_dir):
+                path = os.path.join(session_env_dir, name)
+                if not os.path.isdir(path):
+                    continue
+                if _session_id_from_name(name) in preserve:
+                    continue
+                try:
+                    mtime = os.path.getmtime(path)
+                    if mtime < cutoff:
+                        size = sum(
+                            os.path.getsize(os.path.join(dp, f))
+                            for dp, _, fns in os.walk(path)
+                            for f in fns
+                        )
+                        shutil.rmtree(path)
+                        counts["session_env"] += 1
+                        counts["bytes_freed"] += size
+                except OSError:
+                    pass
+
+        if preserve:
+            log.info(
+                "cleanup_stale_sessions: preserved %d active session(s)",
+                len(preserve),
+            )
+        return counts
+
+    # ── Worktree slot management ───────────────────────────────────────────
 
     def _get_worktree_lock(self, slot: str) -> asyncio.Lock:
         if slot not in self._worktree_locks:
@@ -158,18 +291,13 @@ class CodexExecutor:
     def _resolve_slot(self, req: ExecutionRequest) -> str:
         if (
             req.branch
-            and self._config.codex_worktree_isolation
-            and is_git_repo(self._config.codex_working_dir)
+            and self._config.executor_worktree_isolation
+            and is_git_repo(self._config.executor_working_dir)
         ):
-            return worktree_path(self._config.codex_working_dir, req.branch)
+            return worktree_path(self._config.executor_working_dir, req.branch)
         return "__main__"
 
-    async def run(self) -> None:
-        """Infinite loop: pull requests from queue, dispatch concurrent workers."""
-        log.info("Codex executor started (max_parallel=%d)", self._config.codex_max_parallel)
-        while True:
-            req = await self.queue.get()
-            asyncio.create_task(self._run_one(req))
+    # ── Main consumer loop ─────────────────────────────────────────────────
 
     async def _run_one(self, req: ExecutionRequest) -> None:
         claim_expired = asyncio.Event()
@@ -185,13 +313,15 @@ class CodexExecutor:
         try:
             async with self._semaphore:
                 if claim_expired.is_set():
-                    log.warning("Claim expired while waiting for semaphore: %s", req.superpos_task_id)
+                    log.warning(
+                        "Claim expired while waiting for semaphore: %s",
+                        req.superpos_task_id,
+                    )
                     return
 
                 slot = self._resolve_slot(req)
                 wt_lock = self._get_worktree_lock(slot)
 
-                # Wait for worktree lock OR claim expiry — whichever comes first
                 lock_acquired = False
                 try:
                     lock_task = asyncio.create_task(wt_lock.acquire())
@@ -208,10 +338,12 @@ class CodexExecutor:
                             pass
 
                     if claim_expired.is_set():
-                        # Release lock if we got it while also expiring
                         if lock_task in done and lock_task.result():
                             wt_lock.release()
-                        log.warning("Claim expired while waiting for worktree lock: %s", req.superpos_task_id)
+                        log.warning(
+                            "Claim expired while waiting for worktree lock: %s",
+                            req.superpos_task_id,
+                        )
                         return
 
                     lock_acquired = True
@@ -239,9 +371,8 @@ class CodexExecutor:
             self.queue.task_done()
 
     async def _report_progress(
-        self, task_id: str, claim_expired: asyncio.Event, interval: int = 30
+        self, task_id: str, claim_expired: asyncio.Event, interval: int = 30,
     ) -> None:
-        """Send periodic progress updates to keep the Superpos task alive."""
         progress = 5
         while True:
             await asyncio.sleep(interval)
@@ -250,7 +381,9 @@ class CodexExecutor:
                 await self._superpos.update_progress(task_id, progress)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
-                    log.warning("Claim expired for task %s (409); aborting execution", task_id)
+                    log.warning(
+                        "Claim expired for task %s (409); aborting execution", task_id,
+                    )
                     claim_expired.set()
                     return
                 log.debug("Progress update failed for task %s", task_id)
@@ -283,6 +416,7 @@ class CodexExecutor:
 
         try:
             inner_task = asyncio.create_task(self._execute_inner(req, streamer, retries))
+            self._track_chat_task(req.chat_id, inner_task)
             if req.source == "superpos" and req.superpos_task_id:
                 watcher_task = asyncio.create_task(_watch_claim_expiry())
             try:
@@ -302,13 +436,10 @@ class CodexExecutor:
                     await watcher_task
                 except asyncio.CancelledError:
                     pass
-            # Always drain/close the streamer — idempotent, bounded by
-            # its own timeout so a wedged Telegram gateway can't hang us.
             try:
                 await streamer.finish()
             except Exception:
                 log.debug("Streamer finish failed (non-fatal)", exc_info=True)
-            # Clean up temp media files
             if req.image_paths:
                 for p in req.image_paths:
                     try:
@@ -321,6 +452,8 @@ class CodexExecutor:
                     await self._superpos.update_status("online")
                 except Exception:
                     log.debug("Failed to set agent status to online")
+
+    # ── Background tasks ───────────────────────────────────────────────────
 
     async def run_dream(self, task_id: str, prompt: str) -> None:
         """Backwards-compatible alias for dream tasks."""
@@ -338,7 +471,7 @@ class CodexExecutor:
         No streamer, no semaphore.  The inner subprocess loop runs inside a
         child task so we can forcibly cancel it when the Superpos claim
         expires or the overall timeout fires — otherwise a silent Codex
-        subprocess hangs the reader forever (TASK-stuck-dream scenario).
+        subprocess hangs the reader forever.
         """
         label = task_type.replace("_", " ")
         log.info("%s task %s starting in background", label.capitalize(), task_id)
@@ -363,7 +496,7 @@ class CodexExecutor:
                 *cmd,
                 stdout=PIPE,
                 stderr=PIPE,
-                cwd=self._config.codex_working_dir,
+                cwd=self._config.executor_working_dir,
                 env=env,
                 limit=16 * 1024 * 1024,
             )
@@ -383,10 +516,6 @@ class CodexExecutor:
                         full_text += text
                 await process.wait()
             finally:
-                # Ensure the subprocess is reaped when the inner task is
-                # cancelled (claim expiry, overall timeout).  Without this,
-                # the codex subprocess can linger and its stdout pipe keeps
-                # the reader attached indefinitely.
                 if process.returncode is None:
                     try:
                         process.kill()
@@ -427,7 +556,8 @@ class CodexExecutor:
                 if claim_expired.is_set():
                     expired = True
                     log.warning(
-                        "%s task %s cancelled: claim expired", label.capitalize(), task_id,
+                        "%s task %s cancelled: claim expired",
+                        label.capitalize(), task_id,
                     )
                 else:
                     raise
@@ -439,7 +569,8 @@ class CodexExecutor:
                 if self._superpos and not claim_expired.is_set():
                     try:
                         await self._superpos.fail_task(
-                            task_id, f"{label.capitalize()} timed out after {timeout_seconds}s",
+                            task_id,
+                            f"{label.capitalize()} timed out after {timeout_seconds}s",
                         )
                     except Exception:
                         log.debug("Failed to mark timed-out task %s", task_id)
@@ -474,6 +605,8 @@ class CodexExecutor:
                 except asyncio.CancelledError:
                     pass
 
+    # ── Command construction & inner execute ───────────────────────────────
+
     def _build_codex_command(
         self,
         prompt: str,
@@ -482,13 +615,11 @@ class CodexExecutor:
         system_prompt_append: str | None = None,
     ) -> list[str]:
         """Build the codex CLI command list."""
-        # Prepend system_prompt_append to the user prompt
         full_prompt = prompt
         if system_prompt_append:
             full_prompt = f"{system_prompt_append}\n\n---\n\n{prompt}"
 
         if session_id:
-            # Resume an existing session
             cmd = [
                 "codex", "exec", "resume",
                 "--json",
@@ -524,28 +655,27 @@ class CodexExecutor:
         cwd_override: str | None = None
         if (
             req.branch
-            and self._config.codex_worktree_isolation
-            and is_git_repo(self._config.codex_working_dir)
+            and self._config.executor_worktree_isolation
+            and is_git_repo(self._config.executor_working_dir)
         ):
             try:
                 cwd_override = await ensure_worktree(
-                    self._config.codex_working_dir, req.branch
+                    self._config.executor_working_dir, req.branch,
                 )
             except Exception:
                 log.warning(
                     "Failed to create worktree for branch %r; falling back to default cwd",
-                    req.branch,
-                    exc_info=True,
+                    req.branch, exc_info=True,
                 )
 
         # Inject worktree instructions for requests without an explicit branch
         system_prompt_append: str | None = None
         if (
             not req.branch
-            and self._config.codex_worktree_isolation
-            and is_git_repo(self._config.codex_working_dir)
+            and self._config.executor_worktree_isolation
+            and is_git_repo(self._config.executor_working_dir)
         ):
-            wt_base = self._config.codex_working_dir
+            wt_base = self._config.executor_working_dir
             system_prompt_append = (
                 "## Worktree Isolation\n"
                 "When this task requires implementing code changes on a new branch:\n"
@@ -563,9 +693,8 @@ class CodexExecutor:
         if req.source == "telegram":
             resume_id = self._sessions.get(req.chat_id)
 
-        effective_cwd = cwd_override or self._config.codex_working_dir
+        effective_cwd = cwd_override or self._config.executor_working_dir
 
-        # Prepend image references so Codex reads them via the Read tool
         prompt_text = req.prompt
         if req.image_paths:
             image_refs = "\n".join(f"- {p}" for p in req.image_paths)
@@ -574,9 +703,6 @@ class CodexExecutor:
                 f"{image_refs}\n\n{prompt_text}"
             )
 
-        # Cap prompt size — the CLI passes it as a positional arg,
-        # which must fit in ARG_MAX (~2MB, often less in containers).
-        _MAX_PROMPT = 500_000  # 500KB safe limit
         if len(prompt_text) > _MAX_PROMPT:
             log.warning("Prompt too large (%dKB), truncating", len(prompt_text) // 1024)
             prompt_text = prompt_text[:_MAX_PROMPT] + "\n... (truncated)"
@@ -600,7 +726,7 @@ class CodexExecutor:
                     stderr=PIPE,
                     cwd=effective_cwd,
                     env=env,
-                    limit=16 * 1024 * 1024,  # 16 MB — Codex JSONL events can contain large diffs
+                    limit=16 * 1024 * 1024,
                 )
 
                 stderr_chunks: list[bytes] = []
@@ -608,8 +734,6 @@ class CodexExecutor:
 
                 log.debug("Running codex command: %s (cwd=%s)", cmd, effective_cwd)
 
-                # Read stdout in a coroutine so we can apply a post-exit
-                # timeout if the process dies but grandchild pipes stay open.
                 async def _drain_stdout():
                     nonlocal full_text
                     dedup = _EventDeduplicator()
@@ -623,7 +747,6 @@ class CodexExecutor:
                             log.debug("Non-JSON line from codex: %s", line[:200])
                             continue
 
-                        # Capture error events from JSON stream
                         if event.get("type") == "error":
                             json_errors.append(event.get("message", ""))
                         if event.get("type") == "turn.failed":
@@ -631,7 +754,6 @@ class CodexExecutor:
                             if isinstance(err_info, dict):
                                 json_errors.append(err_info.get("message", ""))
 
-                        # Extract session ID
                         sid = self._extract_session_id(event)
                         if sid and req.source == "telegram":
                             self._sessions.set(req.chat_id, sid)
@@ -648,9 +770,6 @@ class CodexExecutor:
                 drain_task = asyncio.create_task(_drain_stdout())
                 wait_task = asyncio.create_task(process.wait())
 
-                # Wait for both drain and process exit with an overall
-                # execution timeout (default 20 min).  Prevents runaway
-                # tasks from blocking the queue indefinitely.
                 _MAX_EXECUTION_SECS = 30 * 60
                 try:
                     done, pending = await asyncio.wait_for(
@@ -665,7 +784,6 @@ class CodexExecutor:
                         "Codex execution timed out after %ds — killing process (pid=%s)",
                         _MAX_EXECUTION_SECS, process.pid,
                     )
-                    # Kill process FIRST so pipes close, then cancel tasks
                     try:
                         process.kill()
                     except ProcessLookupError:
@@ -680,14 +798,12 @@ class CodexExecutor:
                         except (asyncio.CancelledError, asyncio.TimeoutError):
                             pass
 
-                # Ensure process is reaped
                 if process.returncode is None:
                     try:
                         await asyncio.wait_for(process.wait(), timeout=5)
                     except asyncio.TimeoutError:
                         pass
 
-                # Read remaining stderr — with timeout
                 try:
                     stderr_data = await asyncio.wait_for(
                         process.stderr.read(), timeout=10,
@@ -698,7 +814,6 @@ class CodexExecutor:
                     log.warning("Timed out reading stderr from codex process")
                 stderr_str = b"".join(stderr_chunks).decode(errors="replace")
 
-                # Combine stderr and any JSON error events
                 if not stderr_str.strip() and json_errors:
                     stderr_str = " | ".join(filter(None, json_errors))
 
@@ -707,7 +822,6 @@ class CodexExecutor:
 
                 await streamer.finish()
 
-                # Complete Superpos task if applicable
                 if req.source == "superpos" and req.superpos_task_id and self._superpos:
                     result = full_text[-2000:] if len(full_text) > 2000 else full_text
                     elapsed = int(time.monotonic() - t0)
@@ -735,21 +849,14 @@ class CodexExecutor:
                     or "at capacity" in err_str.lower()
                     or "overloaded" in err_str.lower()
                 )
-                is_auth_error = (
-                    "authentication" in err_str.lower()
-                    or "invalid api key" in err_str.lower()
-                    or "unauthorized" in err_str.lower()
-                    or "invalid_api_key" in err_str.lower()
-                )
 
-                if is_auth_error:
+                if _is_auth_error(err_str):
                     log.critical(
                         "Codex authentication failed — API key invalid or not configured. "
                         "Shutting down."
                     )
                     sys.exit(1)
 
-                # Transient API errors (500, overloaded) — retry with backoff
                 is_api_500 = (
                     "internal server error" in err_str.lower()
                     or "api_error" in err_str.lower()
@@ -761,12 +868,10 @@ class CodexExecutor:
                         "API server error (attempt %d/%d), retrying in %ds: %s",
                         attempt, retries, wait, err_str[:100],
                     )
-                    await streamer.append(f"\n\u23f3 API error, retrying in {wait}s...\n")
+                    await streamer.append(f"\n⏳ API error, retrying in {wait}s...\n")
                     await asyncio.sleep(wait)
                     continue
 
-                # Don't retry if execution already produced output — side
-                # effects (GitHub comments, commits, etc.) cannot be undone.
                 if full_text.strip():
                     log.warning(
                         "Execution produced output but failed (attempt %d/%d); "
@@ -776,10 +881,9 @@ class CodexExecutor:
                 elif is_rate_limit and attempt < retries:
                     wait = 30 * attempt
                     log.warning("Rate limited (attempt %d/%d), retrying in %ds", attempt, retries, wait)
-                    await streamer.append(f"\n\u23f3 Rate limited, retrying in {wait}s...\n")
+                    await streamer.append(f"\n⏳ Rate limited, retrying in {wait}s...\n")
                     await asyncio.sleep(wait)
                     continue
-                # If resume failed (stale session), retry without resume
                 elif resume_id and attempt < retries:
                     log.warning("Session resume failed, retrying with fresh session")
                     self._sessions.clear(req.chat_id)
@@ -832,12 +936,13 @@ class CodexExecutor:
                         log.warning("Failed to mark superpos task %s as failed", req.superpos_task_id)
                 return
 
+    # ── Message parsing ────────────────────────────────────────────────────
+
     @staticmethod
     def _extract_text(event: dict) -> str:
         """Extract assistant text from a Codex JSONL event."""
         etype = event.get("type", "")
 
-        # Message event with content blocks
         if etype == "message" and event.get("role") == "assistant":
             parts = []
             for block in event.get("content", []):
@@ -847,15 +952,12 @@ class CodexExecutor:
                     parts.append(block)
             return "".join(parts)
 
-        # Delta/streaming events
         if etype in ("response.output_text.delta", "content_block_delta"):
             return event.get("delta", event.get("text", ""))
 
-        # Simple text output event
         if etype == "text" and "text" in event:
             return event["text"]
 
-        # item.completed with agent_message
         if etype == "item.completed":
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "agent_message":
@@ -868,7 +970,6 @@ class CodexExecutor:
         """Extract tool use info from a Codex JSONL event."""
         etype = event.get("type", "")
 
-        # Function call events
         if etype == "function_call":
             name = event.get("name", "unknown")
             args = event.get("arguments", {})
@@ -879,7 +980,6 @@ class CodexExecutor:
                     args = {"raw": args}
             return (name, args)
 
-        # Tool call style events
         if etype in ("tool_call", "tool_use"):
             name = event.get("name", event.get("function", {}).get("name", "unknown"))
             args = event.get("input", event.get("arguments", event.get("function", {}).get("arguments", {})))
@@ -890,7 +990,6 @@ class CodexExecutor:
                     args = {"raw": args}
             return (name, args)
 
-        # Nested in item
         item = event.get("item", {})
         if isinstance(item, dict) and item.get("type") in ("function_call", "tool_call", "tool_use"):
             name = item.get("name", "unknown")
@@ -902,10 +1001,8 @@ class CodexExecutor:
                     args = {"raw": args}
             return (name, args)
 
-        # Codex CLI command_execution events (item.started)
         if etype == "item.started" and isinstance(item, dict) and item.get("type") == "command_execution":
             cmd = item.get("command", "")
-            # Strip the /bin/bash -lc wrapper if present
             if cmd.startswith("/bin/bash -lc '") and cmd.endswith("'"):
                 cmd = cmd[15:-1]
             elif cmd.startswith("/bin/bash -lc "):
@@ -917,15 +1014,16 @@ class CodexExecutor:
     @staticmethod
     def _extract_session_id(event: dict) -> str | None:
         """Extract session/thread ID from a Codex JSONL event."""
-        # Check common locations for session/thread ID
         for key in ("session_id", "thread_id", "id"):
             val = event.get(key)
             if val and isinstance(val, str):
-                # Only use 'id' if it looks like a session/thread ID
                 if key == "id" and event.get("type") not in ("response.completed", "session", "response"):
                     continue
                 return val
         return None
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 class _EventDeduplicator:
@@ -945,22 +1043,18 @@ class _EventDeduplicator:
         """Extract text, preferring deltas and skipping duplicate completed messages."""
         etype = event.get("type", "")
 
-        # New response turn resets delta tracking
         if etype in ("response.created", "response.started"):
             self._saw_delta = False
             return ""
 
-        # Streaming deltas — always use, mark that we're receiving them
         if etype in ("response.output_text.delta", "content_block_delta"):
             self._saw_delta = True
             return event.get("delta", event.get("text", ""))
 
-        # Simple text event (also streaming)
         if etype == "text" and "text" in event:
             self._saw_delta = True
             return event["text"]
 
-        # Completed message — only use as fallback when no deltas were seen
         if etype == "message" and event.get("role") == "assistant":
             if self._saw_delta:
                 return ""
@@ -972,7 +1066,6 @@ class _EventDeduplicator:
                     parts.append(block)
             return "".join(parts)
 
-        # item.completed with agent_message — skip if deltas were seen
         if etype == "item.completed":
             if self._saw_delta:
                 return ""
@@ -999,8 +1092,6 @@ class _EventDeduplicator:
             args = event.get("input", event.get("arguments", event.get("function", {}).get("arguments", {})))
             call_id = event.get("call_id", event.get("id", ""))
         elif etype == "item.started":
-            # Only match command_execution — shell commands are exclusively
-            # reported via item.started, not via function_call.
             item = event.get("item", {})
             if isinstance(item, dict) and item.get("type") == "command_execution":
                 cmd = item.get("command", "")
@@ -1014,8 +1105,6 @@ class _EventDeduplicator:
             else:
                 return None
         else:
-            # Skip nested-item wrappers for function_call/tool_call/tool_use —
-            # these duplicate the top-level events handled above.
             return None
 
         if name is None:
@@ -1027,7 +1116,6 @@ class _EventDeduplicator:
             except json.JSONDecodeError:
                 args = {"raw": args}
 
-        # Deduplicate by call_id when available, else by name + args prefix
         if call_id:
             dedup_key = f"id:{call_id}"
         else:
@@ -1048,3 +1136,35 @@ class _CodexProcessError(Exception):
         self.returncode = returncode
         self.stderr = stderr
         super().__init__(f"codex process exited with code {returncode}: {stderr[:500]}")
+
+
+def _is_auth_error(err: str) -> bool:
+    lower = err.lower()
+    return (
+        "authentication" in lower
+        or "invalid api key" in lower
+        or "unauthorized" in lower
+        or "invalid_api_key" in lower
+    )
+
+
+_AUTH_HELP_INVALID_KEY = """
+╔══════════════════════════════════════════════════════════════╗
+║         Codex authentication failed — cannot start          ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  Option 1 — OAuth (codex login):                             ║
+║                                                              ║
+║    docker run -it \\                                         ║
+║      -v codex_auth:/home/agent/.codex \\                     ║
+║      --entrypoint codex superpos-codex-agent login           ║
+║                                                              ║
+║    Follow the prompts to authenticate.                       ║
+║    Then restart the agent (keep the -v flag).                ║
+║                                                              ║
+║  Option 2 — API key:                                         ║
+║                                                              ║
+║    Set OPENAI_API_KEY=sk-... in your .env file.              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+"""
