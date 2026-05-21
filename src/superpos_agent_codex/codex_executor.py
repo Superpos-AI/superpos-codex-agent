@@ -157,24 +157,33 @@ class CodexExecutor(Executor):
         """Verify Codex CLI auth by making a minimal call.
 
         Core's ``run_agent`` marks the agent ``online`` in Superpos *before*
-        invoking preflight.  If we exit here on bad credentials, the
-        asyncio.gather() ``finally`` that flips status back to ``offline``
-        never runs, and Superpos keeps advertising us as online until the
-        heartbeat timeout fires.  Flip offline ourselves on any preflight
-        failure as a best-effort guard.
+        invoking preflight.  If we exit/raise here, the asyncio.gather()
+        ``finally`` that flips status back to ``offline`` never runs, and
+        Superpos keeps advertising us as online until the heartbeat timeout
+        fires.  Wrap the whole probe so *every* failure path — auth error,
+        missing CLI, non-zero exit, unexpected exception — flips offline
+        first.
         """
         log.info("Verifying Codex authentication...")
         try:
-            env = {**os.environ}
-            process = await asyncio.create_subprocess_exec(
-                "codex", "exec", "--json",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check",
-                "hi",
-                stdout=PIPE,
-                stderr=PIPE,
-                env=env,
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "codex", "exec", "--json",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--skip-git-repo-check",
+                    "hi",
+                    stdout=PIPE,
+                    stderr=PIPE,
+                    env={**os.environ},
+                )
+            except FileNotFoundError:
+                await self._mark_offline_best_effort()
+                log.critical(
+                    "'codex' CLI not found on PATH. Install with: "
+                    "npm install -g @openai/codex"
+                )
+                sys.exit(1)
+
             try:
                 _, stderr = await asyncio.wait_for(
                     process.communicate(), timeout=60,
@@ -184,8 +193,12 @@ class CodexExecutor(Executor):
                 return
             if process.returncode != 0:
                 stderr_str = stderr.decode(errors="replace")
+                # Flip offline BEFORE deciding how to surface the failure —
+                # both the auth-error sys.exit() path and the generic
+                # RuntimeError re-raise leave the asyncio.gather() finally
+                # unreached otherwise.
+                await self._mark_offline_best_effort()
                 if _is_auth_error(stderr_str):
-                    await self._mark_offline_best_effort()
                     print(_AUTH_HELP_INVALID_KEY, file=sys.stderr)
                     sys.exit(1)
                 raise RuntimeError(
@@ -193,13 +206,14 @@ class CodexExecutor(Executor):
                     f"{stderr_str[:500]}"
                 )
             log.info("Codex authentication OK")
-        except FileNotFoundError:
+        except SystemExit:
+            raise
+        except Exception:
+            # Catch-all guard so an unexpected probe error (subprocess crash,
+            # OSError, etc.) still flips status offline before the exception
+            # bubbles up to run_agent's sys.exit(1).
             await self._mark_offline_best_effort()
-            log.critical(
-                "'codex' CLI not found on PATH. Install with: "
-                "npm install -g @openai/codex"
-            )
-            sys.exit(1)
+            raise
 
     async def _mark_offline_best_effort(self) -> None:
         if not self._superpos:
