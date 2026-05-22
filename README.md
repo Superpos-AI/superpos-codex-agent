@@ -25,7 +25,7 @@ Fill in your `.env`:
 | `SUPERPOS_CAPABILITIES` | No | Comma-separated capabilities |
 | `SUPERPOS_POLL_INTERVAL` | No | Poll interval in seconds (default: 5) |
 | `OPENAI_API_KEY` | No | Only if not using OAuth |
-| `CODEX_MODEL` | No | Default: gpt-5.4 |
+| `CODEX_MODEL` | No | Default: gpt-5.5 |
 | `CODEX_REASONING_EFFORT` | No | Reasoning effort: minimal, low, medium, high, xhigh (default: high) |
 | `CODEX_MAX_TURNS` | No | Default: 30 |
 | `CODEX_WORKING_DIR` | No | Default: /workspace |
