@@ -55,6 +55,9 @@ EOF
 fi
 
 # Run module setup (install deps, update AGENTS.md)
-python3 -m src.module_setup || echo "Warning: module setup failed"
+python3 -m superpos_agent_core.module_setup \
+    --modules-dir /workspace/.codex/modules \
+    --agents-md /workspace/AGENTS.md \
+    || echo "Warning: module setup failed"
 
 exec "$@"

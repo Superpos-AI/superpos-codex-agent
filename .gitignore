@@ -10,6 +10,8 @@ __pycache__/
 dist/
 build/
 *.egg
+.venv/
+.pytest_cache/
 
 # Claude Code local settings
 .claude/settings.local.json

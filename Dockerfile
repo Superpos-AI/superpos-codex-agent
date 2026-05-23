@@ -40,7 +40,7 @@ RUN useradd -m -s /bin/bash -u 1001 agent && \
     mkdir -p /home/agent/.codex && \
     chown -R agent:agent /workspace /home/agent/.codex
 
-ENV PYTHONPATH="/app"
+ENV PYTHONPATH="/app/src"
 ENV PYTHONUNBUFFERED=1
 ENV HOME="/home/agent"
 
@@ -53,4 +53,4 @@ WORKDIR /workspace
 # subprocesses left behind when a codex run dies) — without it they
 # accumulate as zombies because Python doesn't reap reparented orphans.
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["python3", "-m", "src.main"]
+CMD ["python3", "-m", "superpos_agent_codex"]

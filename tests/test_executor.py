@@ -4,8 +4,8 @@ import httpx
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 
-from src.codex_executor import CodexExecutor, ExecutionRequest, _EventDeduplicator
-from src.config import Config
+from superpos_agent_core import ExecutionRequest
+from superpos_agent_codex.codex_executor import CodexExecutor, _EventDeduplicator
 
 
 # --- Dedup method unit tests (pure sync logic) ---
@@ -83,7 +83,7 @@ async def test_execute_removes_task_after_claim_expiry(executor):
 
     with patch.object(executor, "_report_progress", fake_report_progress), \
          patch.object(executor, "_execute_inner", fake_execute_inner), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         MockStreamer.return_value.start = AsyncMock()
         # Put on queue so task_done() in _run_one works correctly
         await executor.queue.put(req)
@@ -109,9 +109,7 @@ def test_build_codex_command_default(executor, mock_runtime):
     assert "-p" not in cmd
 
 
-def test_build_codex_command_with_session_id(executor, mock_config):
-    mock_config.codex_model = "codex-5.3"
-    mock_config.codex_max_turns = 5
+def test_build_codex_command_with_session_id(executor):
     cmd = executor._build_codex_command("hello", session_id="sess-123")
     assert "resume" in cmd
     assert "sess-123" in cmd
@@ -119,18 +117,14 @@ def test_build_codex_command_with_session_id(executor, mock_config):
 
 # --- _build_codex_command persona injection ---
 
-def test_build_codex_command_persona_injected_via_agents_md(executor_with_persona, mock_config):
+def test_build_codex_command_persona_injected_via_agents_md(executor_with_persona):
     """Persona is injected into AGENTS.md at init time, not via CLI flags."""
-    mock_config.codex_model = "codex-5.3"
-    mock_config.codex_max_turns = 5
     cmd = executor_with_persona._build_codex_command("hello")
     # Persona is NOT passed via --system-prompt (it's in AGENTS.md)
     assert "--system-prompt" not in cmd
 
 
-def test_build_codex_command_no_system_prompt_when_persona_none(executor, mock_config):
-    mock_config.codex_model = "codex-5.3"
-    mock_config.codex_max_turns = 5
+def test_build_codex_command_no_system_prompt_when_persona_none(executor):
     cmd = executor._build_codex_command("hello")
     assert "--system-prompt" not in cmd
 
@@ -153,8 +147,8 @@ def test_build_codex_command_prompt_is_positional(executor, mock_runtime):
 async def test_execute_inner_calls_ensure_worktree_for_superpos_with_branch(
     executor, mock_superpos, mock_config
 ):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(
@@ -169,10 +163,10 @@ async def test_execute_inner_calls_ensure_worktree_for_superpos_with_branch(
     mock_process.wait = AsyncMock(return_value=None)
     mock_process.returncode = 0
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
          patch("asyncio.create_subprocess_exec", return_value=mock_process), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         mock_ensure.return_value = "/workspace/.worktrees/feature-my-branch"
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
@@ -186,8 +180,8 @@ async def test_execute_inner_calls_ensure_worktree_for_superpos_with_branch(
 async def test_execute_inner_telegram_with_explicit_branch_creates_worktree(
     executor, mock_config
 ):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(
@@ -201,10 +195,10 @@ async def test_execute_inner_telegram_with_explicit_branch_creates_worktree(
     mock_process.wait = AsyncMock(return_value=None)
     mock_process.returncode = 0
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
          patch("asyncio.create_subprocess_exec", return_value=mock_process), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         mock_ensure.return_value = "/workspace/.worktrees/feature-x"
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
@@ -216,8 +210,8 @@ async def test_execute_inner_telegram_with_explicit_branch_creates_worktree(
 # --- _execute_inner skips worktree when isolation disabled ---
 
 async def test_execute_inner_skips_worktree_when_isolation_disabled(executor, mock_config):
-    mock_config.codex_worktree_isolation = False
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = False
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(
@@ -232,10 +226,10 @@ async def test_execute_inner_skips_worktree_when_isolation_disabled(executor, mo
     mock_process.wait = AsyncMock(return_value=None)
     mock_process.returncode = 0
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
          patch("asyncio.create_subprocess_exec", return_value=mock_process), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
         await executor._execute_inner(req, streamer, retries=1)
@@ -246,8 +240,8 @@ async def test_execute_inner_skips_worktree_when_isolation_disabled(executor, mo
 # --- _execute_inner falls back gracefully when ensure_worktree fails ---
 
 async def test_execute_inner_falls_back_when_worktree_fails(executor, mock_config):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(
@@ -268,10 +262,10 @@ async def test_execute_inner_falls_back_when_worktree_fails(executor, mock_confi
         captured_cmds.append((args, kwargs))
         return mock_process
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.ensure_worktree", new_callable=AsyncMock) as mock_ensure, \
          patch("asyncio.create_subprocess_exec", side_effect=capture_exec), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         mock_ensure.side_effect = RuntimeError("git error")
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
@@ -286,8 +280,8 @@ async def test_execute_inner_falls_back_when_worktree_fails(executor, mock_confi
 async def test_execute_inner_injects_worktree_hint_for_telegram_with_isolation(
     executor, mock_config
 ):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(prompt="implement a feature", chat_id="123", source="telegram")
@@ -305,9 +299,9 @@ async def test_execute_inner_injects_worktree_hint_for_telegram_with_isolation(
         captured_cmds.append(args)
         return mock_process
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
          patch("asyncio.create_subprocess_exec", side_effect=capture_exec), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
         await executor._execute_inner(req, streamer, retries=1)
@@ -320,8 +314,8 @@ async def test_execute_inner_injects_worktree_hint_for_telegram_with_isolation(
 
 
 async def test_execute_inner_no_worktree_hint_when_isolation_disabled(executor, mock_config):
-    mock_config.codex_worktree_isolation = False
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = False
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(prompt="implement a feature", chat_id="123", source="telegram")
@@ -339,9 +333,9 @@ async def test_execute_inner_no_worktree_hint_when_isolation_disabled(executor, 
         captured_cmds.append(args)
         return mock_process
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
          patch("asyncio.create_subprocess_exec", side_effect=capture_exec), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
         await executor._execute_inner(req, streamer, retries=1)
@@ -352,8 +346,8 @@ async def test_execute_inner_no_worktree_hint_when_isolation_disabled(executor, 
 
 
 async def test_execute_inner_exits_on_auth_error(executor, mock_config):
-    mock_config.codex_worktree_isolation = False
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = False
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(prompt="hello", chat_id="123", source="telegram")
@@ -366,7 +360,7 @@ async def test_execute_inner_exits_on_auth_error(executor, mock_config):
     mock_process.returncode = 1
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer, \
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer, \
          patch("sys.exit") as mock_exit:
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
@@ -382,7 +376,7 @@ def test_has_free_slots_true_when_idle(executor):
 
 
 def test_has_free_slots_false_at_capacity(executor, mock_config):
-    for i in range(mock_config.codex_max_parallel):
+    for i in range(mock_config.executor_max_parallel):
         executor.add_superpos_task(f"task-{i}")
     assert not executor.has_free_slots
 
@@ -390,17 +384,17 @@ def test_has_free_slots_false_at_capacity(executor, mock_config):
 # --- _resolve_slot ---
 
 def test_resolve_slot_main_for_no_branch(executor, mock_config):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     req = ExecutionRequest(prompt="hi", chat_id="1", source="telegram")
     assert executor._resolve_slot(req) == "__main__"
 
 
 def test_resolve_slot_worktree_path_for_branch(executor, mock_config):
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     req = ExecutionRequest(prompt="hi", chat_id="1", source="superpos", branch="feat/x")
-    with patch("src.codex_executor.is_git_repo", return_value=True):
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True):
         result = executor._resolve_slot(req)
     assert result == "/workspace/.worktrees/feat-x"
 
@@ -409,15 +403,15 @@ def test_resolve_slot_worktree_path_for_branch(executor, mock_config):
 
 async def test_status_busy_on_first_task_only(executor, mock_superpos, mock_config):
     """update_status('busy') is called once when two tasks run in parallel on different branches."""
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
 
     async def fake_execute_inner(req, streamer, retries):
         await asyncio.sleep(0.1)
 
     with patch.object(executor, "_execute_inner", fake_execute_inner), \
-         patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         MockStreamer.return_value.start = AsyncMock()
         req1 = ExecutionRequest(prompt="a", chat_id="1", source="superpos", branch="branch-a")
         req2 = ExecutionRequest(prompt="b", chat_id="1", source="superpos", branch="branch-b")
@@ -438,15 +432,15 @@ async def test_status_busy_on_first_task_only(executor, mock_superpos, mock_conf
 
 async def test_status_online_when_all_done(executor, mock_superpos, mock_config):
     """update_status('online') is called only when the last task finishes."""
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
 
     async def fake_execute_inner(req, streamer, retries):
         await asyncio.sleep(0.1)
 
     with patch.object(executor, "_execute_inner", fake_execute_inner), \
-         patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         MockStreamer.return_value.start = AsyncMock()
         req1 = ExecutionRequest(prompt="a", chat_id="1", source="superpos", branch="branch-a")
         req2 = ExecutionRequest(prompt="b", chat_id="1", source="superpos", branch="branch-b")
@@ -470,8 +464,8 @@ async def test_status_online_when_all_done(executor, mock_superpos, mock_config)
 
 async def test_same_branch_tasks_serialize(executor, mock_config):
     """Two tasks targeting the same branch must not overlap."""
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
 
     execution_log = []
 
@@ -481,8 +475,8 @@ async def test_same_branch_tasks_serialize(executor, mock_config):
         execution_log.append(f"end-{req.prompt}")
 
     with patch.object(executor, "_execute_inner", fake_execute_inner), \
-         patch("src.codex_executor.is_git_repo", return_value=True), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         MockStreamer.return_value.start = AsyncMock()
 
         req1 = ExecutionRequest(prompt="first", chat_id="1", source="superpos", branch="same-branch")
@@ -507,8 +501,8 @@ async def test_execute_inner_injects_worktree_hint_for_superpos_without_branch(
 ):
     """Superpos tasks without an explicit branch should get worktree instructions
     so the agent branches from origin/main instead of the current HEAD."""
-    mock_config.codex_worktree_isolation = True
-    mock_config.codex_working_dir = "/workspace"
+    mock_config.executor_worktree_isolation = True
+    mock_config.executor_working_dir = "/workspace"
     mock_config.openai_api_key = ""
 
     req = ExecutionRequest(
@@ -529,9 +523,9 @@ async def test_execute_inner_injects_worktree_hint_for_superpos_without_branch(
         captured_cmds.append(args)
         return mock_process
 
-    with patch("src.codex_executor.is_git_repo", return_value=True), \
+    with patch("superpos_agent_codex.codex_executor.is_git_repo", return_value=True), \
          patch("asyncio.create_subprocess_exec", side_effect=capture_exec), \
-         patch("src.codex_executor.TelegramStreamer") as MockStreamer:
+         patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         streamer = MockStreamer.return_value
         streamer.finish = AsyncMock()
         await executor._execute_inner(req, streamer, retries=1)
