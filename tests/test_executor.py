@@ -1,8 +1,6 @@
 import asyncio
 
-import httpx
-import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from superpos_agent_core import ExecutionRequest
 from superpos_agent_codex.codex_executor import CodexExecutor, _EventDeduplicator
@@ -29,41 +27,10 @@ def test_remove_nonexistent_is_safe(executor):
     executor.remove_superpos_task("nonexistent")  # must not raise
 
 
-# --- _report_progress: 409 sets event, other errors don't ---
-
-async def test_report_progress_409_sets_event(executor, mock_superpos):
-    mock_response = Mock()
-    mock_response.status_code = 409
-    mock_superpos.update_progress.side_effect = httpx.HTTPStatusError(
-        "conflict", request=Mock(), response=mock_response
-    )
-    claim_expired = asyncio.Event()
-    await executor._report_progress("task-1", claim_expired, interval=0.01)
-    assert claim_expired.is_set()
-
-
-async def test_report_progress_500_does_not_set_event(executor, mock_superpos):
-    mock_response = Mock()
-    mock_response.status_code = 500
-    mock_superpos.update_progress.side_effect = [
-        httpx.HTTPStatusError("server error", request=Mock(), response=mock_response),
-        asyncio.CancelledError(),  # stop the loop on second iteration
-    ]
-    claim_expired = asyncio.Event()
-    with pytest.raises(asyncio.CancelledError):
-        await executor._report_progress("task-1", claim_expired, interval=0.01)
-    assert not claim_expired.is_set()
-
-
-async def test_report_progress_generic_exception_does_not_set_event(executor, mock_superpos):
-    mock_superpos.update_progress.side_effect = [
-        Exception("network error"),
-        asyncio.CancelledError(),
-    ]
-    claim_expired = asyncio.Event()
-    with pytest.raises(asyncio.CancelledError):
-        await executor._report_progress("task-1", claim_expired, interval=0.01)
-    assert not claim_expired.is_set()
+# Note: report_progress (the heartbeat coroutine) lives in
+# `superpos_agent_core.progress_reporter` now.  Its unit tests live next to it
+# in core (`tests/test_progress_reporter.py`); we don't re-test the contract
+# here.  Only behaviour that depends on *this* executor's wiring is kept.
 
 
 # --- Claim expiry removes task from in-flight set ---
@@ -71,7 +38,7 @@ async def test_report_progress_generic_exception_does_not_set_event(executor, mo
 async def test_execute_removes_task_after_claim_expiry(executor):
     executor.add_superpos_task("task-x")
 
-    async def fake_report_progress(task_id, claim_expired, interval=30):
+    async def fake_report_progress(client, task_id, claim_expired):
         claim_expired.set()
 
     async def fake_execute_inner(req, streamer, retries):
@@ -81,7 +48,10 @@ async def test_execute_removes_task_after_claim_expiry(executor):
         prompt="hello", chat_id="123", source="superpos", superpos_task_id="task-x"
     )
 
-    with patch.object(executor, "_report_progress", fake_report_progress), \
+    # Patch the *imported* name in the executor module — `report_progress`
+    # is a free function from core, not a method on the executor, so
+    # `patch.object(executor, ...)` no longer applies.
+    with patch("superpos_agent_codex.codex_executor.report_progress", fake_report_progress), \
          patch.object(executor, "_execute_inner", fake_execute_inner), \
          patch("superpos_agent_codex.codex_executor.TelegramStreamer") as MockStreamer:
         MockStreamer.return_value.start = AsyncMock()
@@ -91,6 +61,100 @@ async def test_execute_removes_task_after_claim_expiry(executor):
         await asyncio.wait_for(executor._run_one(req), timeout=2.0)
 
     assert not executor.has_superpos_task("task-x")
+
+
+# --- run_background() report_progress wiring ---
+
+async def test_run_background_reacts_to_claim_expired(executor, mock_superpos):
+    """run_background() must pass (client, task_id, claim_expired) to the
+    imported report_progress helper, and when the claim expires it must cancel
+    the inner subprocess loop and skip the complete_task / fail_task calls."""
+    report_progress_called = {"args": None}
+
+    async def fake_report_progress(client, task_id, claim_expired):
+        report_progress_called["args"] = (client, task_id)
+        await asyncio.sleep(0.05)
+        claim_expired.set()
+        # Keep coroutine alive until cancelled in the finally block
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines([])  # iteration ends immediately
+    # Use a Future to model a process.wait() that blocks until kill() resolves it
+    loop = asyncio.get_event_loop()
+    wait_future: asyncio.Future = loop.create_future()
+
+    async def fake_wait():
+        return await wait_future
+
+    mock_process.wait = AsyncMock(side_effect=fake_wait)
+    mock_process.returncode = None
+
+    def fake_kill():
+        mock_process.returncode = 0
+        if not wait_future.done():
+            wait_future.set_result(0)
+
+    mock_process.kill = MagicMock(side_effect=fake_kill)
+
+    with patch("superpos_agent_codex.codex_executor.report_progress", fake_report_progress), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        await asyncio.wait_for(
+            executor.run_background(
+                "task-bg", "do stuff", task_type="dream", timeout_seconds=5,
+            ),
+            timeout=3.0,
+        )
+
+    # Wiring assertions: the imported report_progress was invoked with the
+    # correct positional arguments (client, task_id).
+    assert report_progress_called["args"] is not None
+    assert report_progress_called["args"][0] is executor._superpos
+    assert report_progress_called["args"][1] == "task-bg"
+
+    # Cleanup assertions: claim expiry means we must not call complete/fail.
+    mock_superpos.complete_task.assert_not_called()
+    mock_superpos.fail_task.assert_not_called()
+
+
+async def test_run_background_calls_complete_on_success(executor, mock_superpos):
+    """When the subprocess exits cleanly, run_background() must call
+    complete_task on the Superpos client — guarding the happy path."""
+
+    async def fake_report_progress(client, task_id, claim_expired):
+        # Idle until cancelled in finally — never set claim_expired.
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+
+    events = [
+        {"type": "response.output_text.delta", "delta": "hello"},
+        {"type": "response.output_text.delta", "delta": " world"},
+    ]
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines(events)
+    mock_process.wait = AsyncMock(return_value=0)
+    mock_process.returncode = 0
+    mock_process.kill = MagicMock()
+
+    with patch("superpos_agent_codex.codex_executor.report_progress", fake_report_progress), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        await asyncio.wait_for(
+            executor.run_background(
+                "task-bg-ok", "do stuff", task_type="dream", timeout_seconds=5,
+            ),
+            timeout=3.0,
+        )
+
+    mock_superpos.complete_task.assert_called_once()
+    args, _kwargs = mock_superpos.complete_task.call_args
+    assert args[0] == "task-bg-ok"
+    mock_superpos.fail_task.assert_not_called()
 
 
 # --- _build_codex_command uses cwd override when provided ---
