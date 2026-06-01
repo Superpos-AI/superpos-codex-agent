@@ -1,8 +1,6 @@
 import asyncio
 
-import httpx
-import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 from superpos_agent_core import ExecutionRequest
 from superpos_agent_codex.codex_executor import CodexExecutor, _EventDeduplicator

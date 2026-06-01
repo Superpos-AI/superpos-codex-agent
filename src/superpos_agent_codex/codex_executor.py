@@ -20,8 +20,6 @@ import time
 from asyncio.subprocess import PIPE
 from pathlib import Path
 
-import httpx
-
 from superpos_agent_core import (
     ExecutionRequest,
     Executor,
