@@ -1,6 +1,6 @@
 import asyncio
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from superpos_agent_core import ExecutionRequest
 from superpos_agent_codex.codex_executor import CodexExecutor, _EventDeduplicator
@@ -61,6 +61,100 @@ async def test_execute_removes_task_after_claim_expiry(executor):
         await asyncio.wait_for(executor._run_one(req), timeout=2.0)
 
     assert not executor.has_superpos_task("task-x")
+
+
+# --- run_background() report_progress wiring ---
+
+async def test_run_background_reacts_to_claim_expired(executor, mock_superpos):
+    """run_background() must pass (client, task_id, claim_expired) to the
+    imported report_progress helper, and when the claim expires it must cancel
+    the inner subprocess loop and skip the complete_task / fail_task calls."""
+    report_progress_called = {"args": None}
+
+    async def fake_report_progress(client, task_id, claim_expired):
+        report_progress_called["args"] = (client, task_id)
+        await asyncio.sleep(0.05)
+        claim_expired.set()
+        # Keep coroutine alive until cancelled in the finally block
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines([])  # iteration ends immediately
+    # Use a Future to model a process.wait() that blocks until kill() resolves it
+    loop = asyncio.get_event_loop()
+    wait_future: asyncio.Future = loop.create_future()
+
+    async def fake_wait():
+        return await wait_future
+
+    mock_process.wait = AsyncMock(side_effect=fake_wait)
+    mock_process.returncode = None
+
+    def fake_kill():
+        mock_process.returncode = 0
+        if not wait_future.done():
+            wait_future.set_result(0)
+
+    mock_process.kill = MagicMock(side_effect=fake_kill)
+
+    with patch("superpos_agent_codex.codex_executor.report_progress", fake_report_progress), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        await asyncio.wait_for(
+            executor.run_background(
+                "task-bg", "do stuff", task_type="dream", timeout_seconds=5,
+            ),
+            timeout=3.0,
+        )
+
+    # Wiring assertions: the imported report_progress was invoked with the
+    # correct positional arguments (client, task_id).
+    assert report_progress_called["args"] is not None
+    assert report_progress_called["args"][0] is executor._superpos
+    assert report_progress_called["args"][1] == "task-bg"
+
+    # Cleanup assertions: claim expiry means we must not call complete/fail.
+    mock_superpos.complete_task.assert_not_called()
+    mock_superpos.fail_task.assert_not_called()
+
+
+async def test_run_background_calls_complete_on_success(executor, mock_superpos):
+    """When the subprocess exits cleanly, run_background() must call
+    complete_task on the Superpos client — guarding the happy path."""
+
+    async def fake_report_progress(client, task_id, claim_expired):
+        # Idle until cancelled in finally — never set claim_expired.
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+
+    events = [
+        {"type": "response.output_text.delta", "delta": "hello"},
+        {"type": "response.output_text.delta", "delta": " world"},
+    ]
+
+    mock_process = AsyncMock()
+    mock_process.stdout = _make_async_lines(events)
+    mock_process.wait = AsyncMock(return_value=0)
+    mock_process.returncode = 0
+    mock_process.kill = MagicMock()
+
+    with patch("superpos_agent_codex.codex_executor.report_progress", fake_report_progress), \
+         patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        await asyncio.wait_for(
+            executor.run_background(
+                "task-bg-ok", "do stuff", task_type="dream", timeout_seconds=5,
+            ),
+            timeout=3.0,
+        )
+
+    mock_superpos.complete_task.assert_called_once()
+    args, _kwargs = mock_superpos.complete_task.call_args
+    assert args[0] == "task-bg-ok"
+    mock_superpos.fail_task.assert_not_called()
 
 
 # --- _build_codex_command uses cwd override when provided ---
