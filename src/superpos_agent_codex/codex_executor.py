@@ -141,6 +141,14 @@ class CodexExecutor(Executor):
         """Clear the stored session for a chat, starting fresh next message."""
         self._sessions.clear(chat_id)
 
+    def model_info(self) -> dict[str, str]:
+        """Current model/effort, reported to Superpos on each heartbeat.
+
+        Reads live runtime state so mid-session ``/model`` / ``/effort``
+        switches surface on the dashboard.
+        """
+        return {"model": self._runtime.model, "effort": self._runtime.effort}
+
     async def run(self) -> None:
         log.info(
             "Codex executor started (max_parallel=%d)",
