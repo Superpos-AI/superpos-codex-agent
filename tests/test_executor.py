@@ -27,6 +27,20 @@ def test_remove_nonexistent_is_safe(executor):
     executor.remove_superpos_task("nonexistent")  # must not raise
 
 
+# --- model_info: reported to Superpos on heartbeat ---
+
+def test_model_info_reports_runtime_model_and_effort(executor, mock_runtime):
+    assert executor.model_info() == {
+        "model": mock_runtime.model,
+        "effort": mock_runtime.effort,
+    }
+
+
+def test_model_info_tracks_runtime_model_switch(executor, mock_runtime):
+    mock_runtime.set_model("gpt-5.4-codex")
+    assert executor.model_info()["model"] == "gpt-5.4-codex"
+
+
 # Note: report_progress (the heartbeat coroutine) lives in
 # `superpos_agent_core.progress_reporter` now.  Its unit tests live next to it
 # in core (`tests/test_progress_reporter.py`); we don't re-test the contract
