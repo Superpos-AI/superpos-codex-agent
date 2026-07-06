@@ -66,10 +66,19 @@ fi
 # build-time symlinks to workspace scripts, so those stay callable from
 # PATH.  Only core-bundled tools (added at runtime) are lost in that
 # degraded mode.
+#
+# --skills-dir makes the registry SKILLS overlay run. Without it,
+# module_setup overlays registry *modules* only and silently skips the
+# skills half (registry.skills_overlay_skipped reason=no_skills_dir), so
+# Codex agents run on baked-in skills alone. Registry skills materialise
+# into /workspace/.codex/skills (registry wins on slug collision); the
+# baked-in *.md files stay as the fallback the overlay degrades to when
+# the registry fetch fails.
 python3 -m superpos_agent_core.module_setup \
     --modules-dir /workspace/.codex/modules \
     --agents-md /workspace/AGENTS.md \
     --bin-dir /workspace/.codex/modules-bin \
+    --skills-dir /workspace/.codex/skills \
     || echo "Warning: module setup failed (build-time workspace symlinks remain in place)"
 
 exec "$@"
