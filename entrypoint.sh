@@ -70,15 +70,25 @@ fi
 # --skills-dir makes the registry SKILLS overlay run. Without it,
 # module_setup overlays registry *modules* only and silently skips the
 # skills half (registry.skills_overlay_skipped reason=no_skills_dir), so
-# Codex agents run on baked-in skills alone. Registry skills materialise
-# into /workspace/.codex/skills (registry wins on slug collision); the
-# baked-in *.md files stay as the fallback the overlay degrades to when
-# the registry fetch fails.
+# Codex agents run on baked-in skills alone.
+#
+# --skills-layout codex is REQUIRED for Codex. The @openai/codex CLI's skill
+# loader (codex-rs/core-skills/src/loader.rs) only registers a skill when it
+# finds a *directory* under a scanned root containing a file named exactly
+# SKILL.md. /workspace/.codex/skills is one of those scanned roots (the
+# project-scope config folder), but a flat <slug>.md file there is invisible
+# to Codex — which is why the baked plan/review/summarize never showed in the
+# native skill list. So the overlay must write dir-per-skill <slug>/SKILL.md;
+# that's what --skills-layout codex does. The baked-in <slug>/SKILL.md dirs
+# (plan/review/summarize) use the same layout and stay as the fallback the
+# overlay degrades to when the registry fetch fails. Registry skills win on
+# slug collision.
 python3 -m superpos_agent_core.module_setup \
     --modules-dir /workspace/.codex/modules \
     --agents-md /workspace/AGENTS.md \
     --bin-dir /workspace/.codex/modules-bin \
     --skills-dir /workspace/.codex/skills \
+    --skills-layout codex \
     || echo "Warning: module setup failed (build-time workspace symlinks remain in place)"
 
 exec "$@"
