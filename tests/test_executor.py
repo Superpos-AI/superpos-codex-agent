@@ -243,6 +243,24 @@ def test_build_preflight_command_no_model_when_empty(executor, mock_runtime):
     assert cmd[-1] == "hi"
 
 
+def test_build_preflight_command_probes_configured_effort(executor, mock_runtime):
+    """The probe must carry the effort flag so an invalid model+effort pair
+    (e.g. max on gpt-5.5) is caught before the agent advertises readiness."""
+    mock_runtime.model = "gpt-5.6-terra"
+    mock_runtime.effort = "max"
+    cmd = executor._build_preflight_command()
+    assert "-c" in cmd
+    assert "model_reasoning_effort=max" in cmd
+    assert cmd[-1] == "hi"
+
+
+def test_build_preflight_command_no_effort_when_empty(executor, mock_runtime):
+    mock_runtime.effort = ""
+    cmd = executor._build_preflight_command()
+    assert not any(str(a).startswith("model_reasoning_effort=") for a in cmd)
+    assert cmd[-1] == "hi"
+
+
 async def test_preflight_invokes_configured_model(executor, mock_runtime):
     mock_runtime.model = "gpt-5.6-terra"
 

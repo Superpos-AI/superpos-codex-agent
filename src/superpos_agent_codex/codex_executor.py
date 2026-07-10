@@ -163,14 +163,18 @@ class CodexExecutor(Executor):
     def _build_preflight_command(self) -> list[str]:
         """Build the minimal ``codex exec`` probe used by :meth:`preflight`.
 
-        The probe MUST pass the same ``--model`` as real task execution
-        (see :meth:`_build_codex_command`).  A bare ``codex exec`` only
+        The probe MUST mirror real task execution (see
+        :meth:`_build_codex_command`): the same ``--model`` *and* the same
+        ``model_reasoning_effort`` override.  A bare ``codex exec`` only
         checks auth against the CLI's default model; if the configured
         model (e.g. ``gpt-5.6-terra``) is unavailable to this deployment —
         no preview access, or a pinned CLI that rejects the slug — the
         probe still succeeds and the agent advertises readiness while every
-        real task fails at ``--model``.  Probing the configured model makes
-        model-access failures stop the agent *before* it goes online.
+        real task fails at ``--model``.  Likewise, an effort the model
+        rejects (e.g. ``max`` on ``gpt-5.5``) only surfaces when the effort
+        flag is present, so the probe carries it too.  Probing the effective
+        model-and-effort pair makes both failure classes stop the agent
+        *before* it goes online.
         """
         cmd = [
             "codex", "exec", "--json",
@@ -179,6 +183,8 @@ class CodexExecutor(Executor):
         ]
         if self._runtime.model:
             cmd.extend(["--model", self._runtime.model])
+        if self._runtime.effort:
+            cmd.extend(["-c", f"model_reasoning_effort={self._runtime.effort}"])
         cmd.append("hi")
         return cmd
 
