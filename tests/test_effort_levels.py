@@ -231,6 +231,66 @@ def test_load_maps_stale_minimal_to_none_on_gpt_5_6(tmp_path):
     assert saved["effort"] == "none"
 
 
+# --- a blank effort is "no override" and must be preserved ---------------
+
+
+def test_load_preserves_blank_effort(tmp_path):
+    """CODEX_REASONING_EFFORT= (blank) must stay blank, not become "max".
+
+    Regression for PR #19 review: ``from_env()`` forwards an empty
+    ``CODEX_REASONING_EFFORT`` verbatim, so ``default_effort=""`` reaches
+    ``_reconcile_effort()``. A blank effort matches no family ladder, so the
+    clamp branch promoted it to the top tier (``max`` on gpt-5.6-terra) — and
+    persisted it — turning "let the CLI default stand" into the costliest
+    reasoning tier. Blank must be left untouched.
+    """
+    rc = CodexRuntimeConfig.load(
+        default_model="gpt-5.6-terra",
+        default_effort="",
+        home_dir=str(tmp_path),
+    )
+    assert rc.model == "gpt-5.6-terra"
+    assert rc.effort == ""
+
+
+def test_load_preserves_blank_effort_on_legacy_model(tmp_path):
+    """The same blank-effort preservation holds for a legacy family (→ "high")."""
+    path = tmp_path / "runtime_config.json"
+    path.write_text(json.dumps({"model": "gpt-5.5", "effort": ""}))
+    rc = CodexRuntimeConfig.load(
+        default_model="gpt-5.6-terra",
+        default_effort="",
+        home_dir=str(tmp_path),
+    )
+    assert rc.model == "gpt-5.5"
+    assert rc.effort == ""
+
+
+def test_switching_model_keeps_blank_effort(tmp_path):
+    """A /model switch with a blank persisted effort must keep it blank.
+
+    Without the guard, ``set_model("gpt-5.6-terra")`` would reconcile the blank
+    effort up to "max"; the CLI-default-stands behaviour would be lost the
+    moment an operator ran ``/model``.
+    """
+    rc = _runtime(tmp_path, model="gpt-5.5", effort="")
+    rc.set_model("gpt-5.6-terra")
+    assert rc.model == "gpt-5.6-terra"
+    assert rc.effort == ""
+    saved = json.loads(Path(rc._path).read_text())
+    assert saved == {"model": "gpt-5.6-terra", "effort": ""}
+
+
+def test_blank_effort_omits_reasoning_flag_from_codex_command(executor, mock_runtime):
+    """A blank effort must omit -c model_reasoning_effort= so the CLI default stands."""
+    mock_runtime.model = "gpt-5.6-terra"
+    mock_runtime.effort = ""
+
+    cmd = executor._build_codex_command("hello")
+
+    assert not any(str(part).startswith("model_reasoning_effort=") for part in cmd)
+
+
 # --- effort flows through to the Codex CLI invocation --------------------
 
 

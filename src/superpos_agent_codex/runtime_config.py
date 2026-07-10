@@ -124,6 +124,16 @@ class CodexRuntimeConfig(RuntimeConfig):
         unsupported *upper* tiers (``xhigh``/``max`` on a legacy model) are
         clamped down to the highest tier the model accepts.
         """
+        # A blank effort is the explicit "no override" state: ``from_env()``
+        # forwards ``CODEX_REASONING_EFFORT=`` verbatim, and
+        # ``_build_codex_command()``/``_build_preflight_command()`` then omit
+        # ``-c model_reasoning_effort=…`` so the Codex CLI's own default stands.
+        # It matches no family ladder, so without this guard it would fall to
+        # the clamp branch and be promoted to the top tier (``max`` on
+        # gpt-5.6, ``high`` on gpt-5.5) — the opposite of no reasoning. Leave
+        # it untouched.
+        if not self.effort:
+            return False
         allowed = self.efforts_for_model(self.model)
         if self.effort in allowed:
             return False
