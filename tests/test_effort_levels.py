@@ -121,6 +121,31 @@ def test_switching_between_models_keeps_valid_effort(tmp_path):
     assert rc.effort == "medium"
 
 
+def test_switching_to_gpt_5_6_maps_minimal_to_none(tmp_path):
+    """Legacy no-reasoning "minimal" must map to GPT-5.6 "none", not "max".
+
+    Regression for PR #19 review: _reconcile_effort() clamped every invalid
+    effort to allowed[-1] (the top tier), so switching a "minimal" (no-reasoning)
+    deployment onto a gpt-5.6 model silently promoted it to the costliest "max".
+    """
+    rc = _runtime(tmp_path, model="gpt-5.5", effort="minimal")
+    rc.set_model("gpt-5.6-terra")
+    assert rc.model == "gpt-5.6-terra"
+    assert rc.effort == "none"
+
+
+def test_switching_to_gpt_5_5_maps_none_to_minimal(tmp_path):
+    """GPT-5.6 no-reasoning "none" must map back to legacy "minimal", not "high".
+
+    Reverse migration direction: switching a "none" deployment onto gpt-5.5 must
+    preserve no-reasoning intent instead of clamping up to the highest tier.
+    """
+    rc = _runtime(tmp_path, model="gpt-5.6-terra", effort="none")
+    rc.set_model("gpt-5.5")
+    assert rc.model == "gpt-5.5"
+    assert rc.effort == "minimal"
+
+
 def test_reconciled_effort_is_persisted(tmp_path):
     """The downgrade must be written to disk, not just held in memory."""
     rc = _runtime(tmp_path, model="gpt-5.6-terra", effort="max")
@@ -183,6 +208,27 @@ def test_set_effort_accepts_none_on_gpt_5_6(tmp_path):
     rc = _runtime(tmp_path, model="gpt-5.6-terra", effort="high")
     rc.set_effort("none")
     assert rc.effort == "none"
+
+
+def test_load_maps_stale_minimal_to_none_on_gpt_5_6(tmp_path):
+    """A pre-upgrade config file (effort=minimal) must load as "none" on gpt-5.6.
+
+    Regression for PR #19 review: this is the default-model rollout path — an
+    operator who ran CODEX_REASONING_EFFORT=minimal on gpt-5.5 and now picks up
+    the gpt-5.6-terra default must keep no reasoning, not jump to "max".
+    """
+    path = tmp_path / "runtime_config.json"
+    path.write_text(json.dumps({"model": "gpt-5.6-terra", "effort": "minimal"}))
+    rc = CodexRuntimeConfig.load(
+        default_model="gpt-5.6-terra",
+        default_effort="none",
+        home_dir=str(tmp_path),
+    )
+    assert rc.model == "gpt-5.6-terra"
+    assert rc.effort == "none"
+    # persisted once so the reconciliation doesn't repeat every startup
+    saved = json.loads(path.read_text())
+    assert saved["effort"] == "none"
 
 
 # --- effort flows through to the Codex CLI invocation --------------------

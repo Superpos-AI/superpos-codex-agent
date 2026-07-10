@@ -60,6 +60,12 @@ class CodexRuntimeConfig(RuntimeConfig):
         {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
     )
 
+    # The "no reasoning" bottom tier was renamed between families: legacy
+    # "minimal" became GPT-5.6's "none". They are the same intent under two
+    # names, so reconciliation must map one to the other rather than clamp a
+    # no-reasoning deployment up to the most expensive tier.
+    _BOTTOM_TIER_ALIASES: frozenset[str] = frozenset({"none", "minimal"})
+
     @classmethod
     def efforts_for_model(cls, model: str) -> tuple[str, ...]:
         """Reasoning-effort levels valid for ``model``.
@@ -102,22 +108,34 @@ class CodexRuntimeConfig(RuntimeConfig):
         self._save()
 
     def _reconcile_effort(self) -> bool:
-        """Downgrade a persisted effort the current model can't accept.
+        """Reconcile a persisted effort the current model can't accept.
 
         Returns ``True`` when the effort was changed.  Called on every
         ``/model`` switch and once at :meth:`load` so a stale
         ``runtime_config.json`` (e.g. ``model=gpt-5.5, effort=max`` carried over
         from an earlier default) can't leave every ``codex exec`` rejected.
+
+        The bottom "no reasoning" tier was renamed across families (legacy
+        ``minimal`` ↔ GPT-5.6 ``none``), so an invalid bottom tier is *mapped*
+        to the target family's bottom tier — never clamped up. Clamping to the
+        highest valid tier would silently turn a no-reasoning deployment into
+        the costliest one (``minimal`` → ``max`` on the gpt-5.6 default switch;
+        ``none`` → ``high`` on a switch back to gpt-5.5). Only genuinely
+        unsupported *upper* tiers (``xhigh``/``max`` on a legacy model) are
+        clamped down to the highest tier the model accepts.
         """
         allowed = self.efforts_for_model(self.model)
         if self.effort in allowed:
             return False
-        downgraded = allowed[-1]  # highest tier the model still accepts
+        if self.effort in self._BOTTOM_TIER_ALIASES:
+            reconciled = allowed[0]  # target family's bottom (no-reasoning) tier
+        else:
+            reconciled = allowed[-1]  # clamp an unsupported upper tier down
         log.warning(
-            "Effort %r is invalid for model %r — downgrading to %r",
-            self.effort, self.model, downgraded,
+            "Effort %r is invalid for model %r — reconciling to %r",
+            self.effort, self.model, reconciled,
         )
-        self.effort = downgraded
+        self.effort = reconciled
         return True
 
     @classmethod
