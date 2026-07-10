@@ -160,6 +160,28 @@ class CodexExecutor(Executor):
 
     # ── Optional hooks ─────────────────────────────────────────────────────
 
+    def _build_preflight_command(self) -> list[str]:
+        """Build the minimal ``codex exec`` probe used by :meth:`preflight`.
+
+        The probe MUST pass the same ``--model`` as real task execution
+        (see :meth:`_build_codex_command`).  A bare ``codex exec`` only
+        checks auth against the CLI's default model; if the configured
+        model (e.g. ``gpt-5.6-terra``) is unavailable to this deployment —
+        no preview access, or a pinned CLI that rejects the slug — the
+        probe still succeeds and the agent advertises readiness while every
+        real task fails at ``--model``.  Probing the configured model makes
+        model-access failures stop the agent *before* it goes online.
+        """
+        cmd = [
+            "codex", "exec", "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+        ]
+        if self._runtime.model:
+            cmd.extend(["--model", self._runtime.model])
+        cmd.append("hi")
+        return cmd
+
     async def preflight(self) -> None:
         """Verify Codex CLI auth by making a minimal call.
 
@@ -175,10 +197,7 @@ class CodexExecutor(Executor):
         try:
             try:
                 process = await asyncio.create_subprocess_exec(
-                    "codex", "exec", "--json",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--skip-git-repo-check",
-                    "hi",
+                    *self._build_preflight_command(),
                     stdout=PIPE,
                     stderr=PIPE,
                     env={**os.environ},

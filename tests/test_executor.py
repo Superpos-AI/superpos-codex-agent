@@ -220,6 +220,49 @@ def test_build_codex_command_prompt_is_positional(executor, mock_runtime):
     assert cmd[-1] == "hello world"
 
 
+# --- preflight probes the configured model, not just the CLI default ---
+
+def test_build_preflight_command_probes_configured_model(executor, mock_runtime):
+    mock_runtime.model = "gpt-5.6-terra"
+    cmd = executor._build_preflight_command()
+    assert cmd[0:2] == ["codex", "exec"]
+    assert "--json" in cmd
+    assert "--skip-git-repo-check" in cmd
+    # The probe must pin the configured model so model-access failures are
+    # caught before the agent advertises readiness.
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-terra"
+    # Prompt stays a trailing positional arg.
+    assert cmd[-1] == "hi"
+
+
+def test_build_preflight_command_no_model_when_empty(executor, mock_runtime):
+    mock_runtime.model = ""
+    cmd = executor._build_preflight_command()
+    assert "--model" not in cmd
+    assert cmd[-1] == "hi"
+
+
+async def test_preflight_invokes_configured_model(executor, mock_runtime):
+    mock_runtime.model = "gpt-5.6-terra"
+
+    mock_process = AsyncMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    captured = {}
+
+    async def capture_exec(*args, **kwargs):
+        captured["args"] = args
+        return mock_process
+
+    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+        await executor.preflight()
+
+    assert "--model" in captured["args"]
+    assert "gpt-5.6-terra" in captured["args"]
+
+
 # --- _execute_inner calls ensure_worktree when branch + isolation enabled ---
 
 async def test_execute_inner_calls_ensure_worktree_for_superpos_with_branch(
