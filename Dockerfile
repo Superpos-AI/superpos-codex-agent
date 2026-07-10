@@ -12,7 +12,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     apt-get update && apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @openai/codex
+# Pinned: 0.144.1 is the first CLI that supports the gpt-5.6 (sol/terra/luna)
+# models. Bump this when adopting a newer model that a later CLI requires.
+RUN npm install -g @openai/codex@0.144.1
 
 WORKDIR /app
 
