@@ -21,4 +21,7 @@ class CodexRuntimeConfig(RuntimeConfig):
         "o3",
     )
 
-    EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+    # GPT-5.6 (Sol/Terra/Luna) documents reasoning efforts none/low/medium/high/
+    # xhigh/max. "max" must be selectable so /effort can reach the top tier; the
+    # core RuntimeConfig.set_effort() rejects anything outside this tuple.
+    EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
