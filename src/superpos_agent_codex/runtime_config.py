@@ -35,14 +35,27 @@ class CodexRuntimeConfig(RuntimeConfig):
         "o3",
     )
 
-    # GPT-5.6 (Sol/Terra/Luna) documents reasoning efforts none/low/medium/high/
-    # xhigh/max. "max" must be selectable so /effort can reach the top tier; the
-    # core RuntimeConfig.set_effort() rejects anything outside this tuple.
-    EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+    # The reasoning-effort ladder differs by model *family*, and not only at the
+    # top: GPT-5.6 renamed the bottom "no reasoning" tier from "minimal" to
+    # "none". A single global ladder can't express both, so each family gets its
+    # own tuple and EFFORT_LEVELS is the union the core set_effort() validates
+    # against; efforts_for_model() narrows it per model.
 
-    # The top two tiers are GPT-5.6-only. Every other model (gpt-5.5 and below)
-    # tops out at "high"; selecting xhigh/max there is rejected by the API.
-    _EXTENDED_EFFORTS: tuple[str, ...] = ("xhigh", "max")
+    # GPT-5.6 (Sol/Terra/Luna): bottom tier is "none" (no reasoning); the top
+    # tiers "xhigh"/"max" are GPT-5.6-only.
+    _GPT_5_6_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")
+
+    # Older families (gpt-5.5 and below): bottom tier is "minimal" and they top
+    # out at "high" — they never accepted "none", "xhigh", or "max".
+    _LEGACY_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+
+    # Union of every effort any known model accepts. The core
+    # RuntimeConfig.set_effort() rejects anything outside this tuple; the
+    # per-model narrowing happens in efforts_for_model().
+    EFFORT_LEVELS: tuple[str, ...] = (
+        "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    )
+
     _EXTENDED_EFFORT_MODELS: frozenset[str] = frozenset(
         {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
     )
@@ -51,16 +64,18 @@ class CodexRuntimeConfig(RuntimeConfig):
     def efforts_for_model(cls, model: str) -> tuple[str, ...]:
         """Reasoning-effort levels valid for ``model``.
 
-        The GPT-5.6 trio accepts the full ladder.  Unknown/custom model ids
-        also get the full ladder — the known list is only a hint (``/model``
+        The GPT-5.6 trio accepts the ``none..max`` ladder.  Unknown/custom model
+        ids get the full union — the known list is only a hint (``/model``
         accepts any valid id), so we can't second-guess a model we ship no
         profile for; the preflight probe is the backstop that rejects an
         actually-incompatible model+effort pair.  Every *known* older family
-        tops out at ``high``.
+        uses ``minimal`` as its bottom tier and tops out at ``high``.
         """
-        if model in cls._EXTENDED_EFFORT_MODELS or model not in cls.KNOWN_MODELS:
+        if model in cls._EXTENDED_EFFORT_MODELS:
+            return cls._GPT_5_6_EFFORTS
+        if model not in cls.KNOWN_MODELS:
             return cls.EFFORT_LEVELS
-        return tuple(e for e in cls.EFFORT_LEVELS if e not in cls._EXTENDED_EFFORTS)
+        return cls._LEGACY_EFFORTS
 
     def set_effort(self, effort: str) -> None:
         """Validate the requested effort against the *currently selected* model.

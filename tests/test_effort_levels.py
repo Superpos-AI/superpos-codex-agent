@@ -1,11 +1,14 @@
 """Regression coverage for the Codex reasoning-effort contract.
 
 Reasoning-effort validity is **model-specific**. The GPT-5.6 (Sol/Terra/Luna)
-trio documents the full ``minimal/low/medium/high/xhigh/max`` ladder; earlier
-families (gpt-5.5 and below) top out at ``high``. Treating the ladder as global
-let ``/effort max`` persist against a gpt-5.5 deployment, after which every
+trio documents the full ``none/low/medium/high/xhigh/max`` ladder; earlier
+families (gpt-5.5 and below) use ``minimal`` as their bottom tier and top out at
+``high``. Treating the ladder as global let ``/effort max`` persist against a
+gpt-5.5 deployment, after which every
 ``codex exec --model gpt-5.5 -c model_reasoning_effort=max`` was rejected while
-the runtime still advertised the agent as ready (PR #19 review).
+the runtime still advertised the agent as ready (PR #19 review). It also dropped
+GPT-5.6's ``none`` tier, so ``CODEX_REASONING_EFFORT=none`` was reconciled up to
+``max`` — turning an explicit no-reasoning deployment into the costliest one.
 
 These tests pin: the level registry, model-specific ``set_effort`` validation,
 effort reconciliation when ``/model`` switches to a lower-tier model, the same
@@ -42,6 +45,23 @@ def test_gpt_5_6_models_accept_the_full_ladder():
     for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
         allowed = CodexRuntimeConfig.efforts_for_model(model)
         assert "xhigh" in allowed and "max" in allowed
+
+
+def test_gpt_5_6_bottom_tier_is_none_not_minimal():
+    """GPT-5.6 renamed the no-reasoning tier "minimal" -> "none" (PR #19 review)."""
+    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        allowed = CodexRuntimeConfig.efforts_for_model(model)
+        assert "none" in allowed
+        assert "minimal" not in allowed
+        assert allowed[0] == "none"
+
+
+def test_older_models_use_minimal_not_none():
+    """Legacy families keep "minimal"; they never accepted GPT-5.6's "none"."""
+    for model in ("gpt-5.5", "gpt-5.5-mini", "gpt-5.4", "o3"):
+        allowed = CodexRuntimeConfig.efforts_for_model(model)
+        assert "minimal" in allowed
+        assert "none" not in allowed
 
 
 def test_older_models_top_out_at_high():
@@ -139,6 +159,30 @@ def test_load_keeps_valid_effort(tmp_path):
         home_dir=str(tmp_path),
     )
     assert rc.effort == "max"
+
+
+def test_load_preserves_none_effort_on_gpt_5_6(tmp_path):
+    """CODEX_REASONING_EFFORT=none on gpt-5.6 must stay "none", not become "max".
+
+    Regression for PR #19 review: the effort registry dropped GPT-5.6's "none"
+    tier, so a fresh load with default_effort="none" (no config file yet) failed
+    validation and _reconcile_effort() bumped it up to the highest valid tier —
+    silently turning an explicit no-reasoning deployment into the costliest one.
+    """
+    rc = CodexRuntimeConfig.load(
+        default_model="gpt-5.6-terra",
+        default_effort="none",
+        home_dir=str(tmp_path),
+    )
+    assert rc.model == "gpt-5.6-terra"
+    assert rc.effort == "none"
+
+
+def test_set_effort_accepts_none_on_gpt_5_6(tmp_path):
+    """/effort none must be selectable on GPT-5.6 (no-reasoning tier)."""
+    rc = _runtime(tmp_path, model="gpt-5.6-terra", effort="high")
+    rc.set_effort("none")
+    assert rc.effort == "none"
 
 
 # --- effort flows through to the Codex CLI invocation --------------------

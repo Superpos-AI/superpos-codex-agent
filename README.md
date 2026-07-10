@@ -26,7 +26,7 @@ Fill in your `.env`:
 | `SUPERPOS_POLL_INTERVAL` | No | Poll interval in seconds (default: 5) |
 | `OPENAI_API_KEY` | No | Only if not using OAuth |
 | `CODEX_MODEL` | No | Default: gpt-5.6-terra |
-| `CODEX_REASONING_EFFORT` | No | Reasoning effort: minimal, low, medium, high, xhigh (default: high) |
+| `CODEX_REASONING_EFFORT` | No | Reasoning effort (model-specific). GPT-5.6: none, low, medium, high, xhigh, max. Older models: minimal, low, medium, high (default: high) |
 | `CODEX_MAX_TURNS` | No | Default: 30 |
 | `CODEX_WORKING_DIR` | No | Default: /workspace |
 
@@ -183,7 +183,7 @@ tests/
 - Send any text message to your Telegram bot -- Codex processes it and streams the response back
 - `/status` -- check queue depth
 - `/model [<id>|list]` -- show or change the model. Any valid id is accepted; `/model list` prints known ids. Persists across restarts.
-- `/effort [minimal|low|medium|high|xhigh]` -- show or change reasoning effort. Persists across restarts.
+- `/effort [<level>]` -- show or change reasoning effort. Valid levels are model-specific: GPT-5.6 accepts `none|low|medium|high|xhigh|max`, older models `minimal|low|medium|high`. Persists across restarts.
 - `/new` -- clear session (start fresh conversation)
 - `/restart` -- restart the agent
 - Superpos tasks are automatically polled, claimed, executed, and completed
