@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 #          (`python3 -m superpos_agent_core.github_auth setup`); an older core
 #          silently leaves git/gh auth unconfigured.
 # 0.1.12 — module_setup honours `--skills-dir` (the registry SKILLS overlay).
-#          The entrypoint now passes `--skills-dir /workspace/.codex/skills`,
+#          The entrypoint passes `--skills-dir /workspace/.agents/skills`,
 #          so the floor must guarantee that support or registry skills never
 #          reach Codex agents.
 MIN_CORE = (0, 1, 12)

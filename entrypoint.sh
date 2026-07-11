@@ -70,15 +70,30 @@ fi
 # --skills-dir makes the registry SKILLS overlay run. Without it,
 # module_setup overlays registry *modules* only and silently skips the
 # skills half (registry.skills_overlay_skipped reason=no_skills_dir), so
-# Codex agents run on baked-in skills alone. Registry skills materialise
-# into /workspace/.codex/skills (registry wins on slug collision); the
-# baked-in *.md files stay as the fallback the overlay degrades to when
-# the registry fetch fails.
+# Codex agents run on baked-in skills alone.
+#
+# The skills root MUST be /workspace/.agents/skills. Per the official Codex
+# skills docs (https://developers.openai.com/codex/skills), the @openai/codex
+# CLI scans `.agents/skills` in every directory from $CWD up to the repo root,
+# plus $HOME/.agents/skills and /etc/codex/skills — it does NOT scan
+# `.codex/skills`. Writing skills under `.codex/skills` leaves them invisible
+# to Codex (verified with codex-cli 0.144.1: `codex debug prompt-input` listed
+# none of plan/review/summarize). /workspace is the repo root at runtime, so
+# /workspace/.agents/skills is a scanned root.
+#
+# --skills-layout codex is REQUIRED for Codex. Its skill loader only registers
+# a skill when it finds a *directory* under a scanned root containing a file
+# named exactly SKILL.md; a flat <slug>.md file is invisible. So the overlay
+# must write dir-per-skill <slug>/SKILL.md — that's what --skills-layout codex
+# does. The baked-in <slug>/SKILL.md dirs (plan/review/summarize) use the same
+# layout and stay as the fallback the overlay degrades to when the registry
+# fetch fails. Registry skills win on slug collision.
 python3 -m superpos_agent_core.module_setup \
     --modules-dir /workspace/.codex/modules \
     --agents-md /workspace/AGENTS.md \
     --bin-dir /workspace/.codex/modules-bin \
-    --skills-dir /workspace/.codex/skills \
+    --skills-dir /workspace/.agents/skills \
+    --skills-layout codex \
     || echo "Warning: module setup failed (build-time workspace symlinks remain in place)"
 
 exec "$@"
