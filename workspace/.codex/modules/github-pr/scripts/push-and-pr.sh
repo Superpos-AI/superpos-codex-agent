@@ -14,18 +14,19 @@ cd "$REPO_DIR"
 # Unlike `git` (which resolves the right connection via the owner-aware
 # credential helper registered at boot), `gh` does NOT go through that helper —
 # it just uses GH_TOKEN. So we must mint an OWNER-SCOPED token here: on
-# multi-connection App auth, a token minted without --owner is the single boot
-# token and 401s on repos owned by a different connection. Derive the owner
-# from the origin remote and pass it through.
+# multi-connection App auth, a token minted without an owner is the single boot
+# token and 401s on repos owned by a different connection. Hand the raw origin
+# remote URL to the broker via --repo and let it parse the owner — it handles
+# https/ssh/slug forms (including a trailing slash) in one tested place, unlike
+# a fragile local regex that silently mis-parses e.g. a trailing-slash remote.
 #
-# Best-effort throughout: if owner extraction, the owner-scoped mint (older
-# agent-core without --owner support), or the broker itself fails, GH_TOKEN
-# stays empty and gh falls back to its own auth state.
+# Best-effort throughout: if the origin URL is missing, the owner-aware mint
+# fails (older agent-core without --repo support), or the broker itself fails,
+# GH_TOKEN stays empty and gh falls back to its own auth state.
 if [ -z "${GITHUB_TOKEN:-}" ]; then
     ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
-    OWNER="$(printf '%s' "$ORIGIN_URL" | sed -E 's#.*[:/]([^/]+)/[^/]+$#\1#')"
-    if [ -n "$OWNER" ]; then
-        GH_TOKEN="$(python3 -m superpos_agent_core.github_auth token --owner "$OWNER" 2>/dev/null || true)"
+    if [ -n "$ORIGIN_URL" ]; then
+        GH_TOKEN="$(python3 -m superpos_agent_core.github_auth token --repo "$ORIGIN_URL" 2>/dev/null || true)"
     fi
     if [ -z "${GH_TOKEN:-}" ]; then
         GH_TOKEN="$(python3 -m superpos_agent_core.github_auth token 2>/dev/null || true)"
