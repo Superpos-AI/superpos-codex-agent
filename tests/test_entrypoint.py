@@ -43,17 +43,23 @@ def test_skills_dir_passed():
     )
 
 
-def test_skills_dir_points_at_codex_skills():
-    """The overlay target must be the Codex skills dir documented in AGENTS.md
-    (`.codex/skills`) so materialised registry skills are actually discovered
-    by the Codex CLI."""
+def test_skills_dir_points_at_agents_skills():
+    """The overlay target must be a directory the Codex CLI actually scans.
+
+    Per the official Codex skills docs
+    (https://developers.openai.com/codex/skills), @openai/codex scans
+    `.agents/skills` from $CWD up to the repo root (plus $HOME/.agents/skills
+    and /etc/codex/skills) — it does NOT scan `.codex/skills`. /workspace is
+    the repo root at runtime, so the overlay must target
+    /workspace/.agents/skills; anything under /workspace/.codex/skills is
+    invisible to Codex (the bug gilfoilbot-dev flagged on PR #18)."""
     block = _module_setup_block()
     m = re.search(r"--skills-dir\s+(\S+)", block)
     assert m, "module_setup must pass a value for --skills-dir"
-    assert m.group(1) == "/workspace/.codex/skills", (
-        "module_setup --skills-dir must point at /workspace/.codex/skills "
-        "(matching --modules-dir /workspace/.codex/modules and the skills "
-        "path AGENTS.md documents)"
+    assert m.group(1) == "/workspace/.agents/skills", (
+        "module_setup --skills-dir must point at /workspace/.agents/skills "
+        "(the Codex-scanned root); /workspace/.codex/skills is not scanned by "
+        "the Codex CLI"
     )
 
 
@@ -61,7 +67,7 @@ def test_skills_layout_is_codex():
     """module_setup must receive --skills-layout codex.
 
     The @openai/codex CLI's skill loader only registers a skill when it finds
-    a *directory* under a scanned root (e.g. /workspace/.codex/skills)
+    a *directory* under a scanned root (e.g. /workspace/.agents/skills)
     containing a file named exactly SKILL.md. A flat <slug>.md file is
     invisible to Codex — which is why registry skills (and the baked
     plan/review/summarize) never appeared in the native skill list. The
@@ -88,7 +94,9 @@ def test_module_setup_fallback_is_non_fatal():
 
 # ── Baked-in skills must use the Codex dir-per-skill layout ──────────
 
-SKILLS_DIR = REPO_ROOT / "workspace" / ".codex" / "skills"
+# The baked fallback lives under the same Codex-scanned root the overlay
+# targets: .agents/skills, NOT .codex/skills (which Codex never scans).
+SKILLS_DIR = REPO_ROOT / "workspace" / ".agents" / "skills"
 
 
 def test_baked_skills_use_dir_per_skill_layout():
@@ -121,3 +129,40 @@ def test_baked_skills_present():
         assert (SKILLS_DIR / slug / "SKILL.md").is_file(), (
             f"expected baked skill {slug}/SKILL.md"
         )
+
+
+def test_baked_skills_root_is_codex_scanned():
+    """The baked skills must live under a directory the Codex CLI scans.
+
+    Codex scans `.agents/skills` (from $CWD to repo root, plus $HOME and
+    /etc), never `.codex/skills`. If the baked skills drifted back under
+    `.codex/skills` they would be invisible to Codex even though the files
+    exist — exactly the runtime bug flagged on PR #18. Pin the root to
+    `.agents/skills` so that regression can't silently return."""
+    assert SKILLS_DIR.parts[-2:] == (".agents", "skills"), (
+        f"baked skills must live under .agents/skills (a Codex-scanned root), "
+        f"not {'/'.join(SKILLS_DIR.parts[-2:])}"
+    )
+    # No stale copies left under the old, unscanned .codex/skills root.
+    old_root = REPO_ROOT / "workspace" / ".codex" / "skills"
+    assert not old_root.exists(), (
+        f"stale baked skills remain under {old_root}; Codex does not scan "
+        f".codex/skills, so these are dead files"
+    )
+
+
+def test_baked_skills_root_matches_overlay_target():
+    """The baked fallback and the registry-overlay target must be the same
+    Codex-scanned root, so both baked and registry skills are discoverable and
+    a registry skill can win on slug collision with its baked counterpart."""
+    block = _module_setup_block()
+    m = re.search(r"--skills-dir\s+(\S+)", block)
+    assert m, "module_setup must pass a value for --skills-dir"
+    overlay_target = m.group(1)
+    baked_runtime = "/workspace/" + "/".join(
+        SKILLS_DIR.relative_to(REPO_ROOT / "workspace").parts
+    )
+    assert overlay_target == baked_runtime, (
+        f"entrypoint overlays registry skills into {overlay_target} but the "
+        f"baked skills ship at {baked_runtime}; they must share one root"
+    )

@@ -189,7 +189,7 @@ Your PR comments and pushes trigger GitHub webhooks, which create new Superpos t
 
 ## Skills
 
-Custom skills are available in `.codex/skills/`. Use `/skill-name` to invoke them.
+Custom skills are available in `.agents/skills/`. Use `/skill-name` to invoke them.
 
 ## Subagents
 
