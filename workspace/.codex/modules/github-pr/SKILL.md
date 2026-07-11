@@ -43,5 +43,6 @@ push-and-pr.sh <repo-dir> <pr-title> [pr-body]
 
 ## Requirements
 
-- `GITHUB_TOKEN` must be set (configured via entrypoint.sh)
-- `gh` CLI must be authenticated (done automatically if GITHUB_TOKEN is set)
+- Auth works via a GitHub App service connection (the owner-aware credential helper is registered at boot by `github_auth setup`) OR a static `GITHUB_TOKEN`.
+- `clone-and-branch.sh`/`git clone` and `push-and-pr.sh` work token-free under the App connection — they are broker/owner-aware.
+- For GitHub **API** work, prefer the `superpos-github` module or an owner-scoped `github_auth token --owner <owner>`.

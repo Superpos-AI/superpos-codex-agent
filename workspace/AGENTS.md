@@ -7,7 +7,7 @@ You are running inside a Docker container as part of the Slim Superpos Agent sys
 - **OS**: Debian (node:22-slim based)
 - **Working directory**: /workspace
 - **Available tools**: git, node, npm, python3, pip
-- **GitHub API**: Always use `gh` CLI for GitHub operations (PRs, issues, API calls). Never use `curl` with the GitHub API directly -- `gh` is pre-authenticated and handles pagination/auth automatically.
+- **GitHub API**: Prefer the `superpos-github` module for GitHub operations (PRs, issues, API calls) -- `superpos-github api METHOD /path`. It's the owner-aware server-side proxy and works across multiple GitHub App connections. Don't `curl` the GitHub API directly. Do NOT assume `gh` is pre-authenticated: on multi-connection App auth, raw `gh` uses a single boot token and will 401 on repos owned by a different connection. If you must use `gh`, first set `GH_TOKEN="$(python3 -m superpos_agent_core.github_auth token --owner <repo-owner>)"` so it gets the right connection's token.
 - **Cloned repos**: `/workspace/repos/` — repositories are cloned here. Before cloning, always check if the repo already exists at `/workspace/repos/<RepoName>`. If it does, use it (run `git fetch` if needed). Only clone if it's genuinely not there yet.
 - **User**: non-root `agent` user
 - **Network**: full internet access
