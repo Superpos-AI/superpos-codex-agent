@@ -13,7 +13,7 @@ class CodexConfig(BaseConfig):
     """Adds Codex-specific knobs on top of the universal BaseConfig."""
 
     openai_api_key: str = ""
-    codex_model: str = "gpt-5.5"
+    codex_model: str = "gpt-5.6-terra"
     codex_reasoning_effort: str = "high"
 
     def __post_init__(self) -> None:
@@ -53,7 +53,7 @@ class CodexConfig(BaseConfig):
         base.update(
             executor_kind="codex",
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-            codex_model=os.environ.get("CODEX_MODEL", "gpt-5.5"),
+            codex_model=os.environ.get("CODEX_MODEL", "gpt-5.6-terra"),
             codex_reasoning_effort=os.environ.get("CODEX_REASONING_EFFORT", "high"),
         )
         return cls(**base)
