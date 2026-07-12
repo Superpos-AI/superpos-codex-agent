@@ -13,7 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 #          The entrypoint passes `--skills-dir /workspace/.agents/skills`,
 #          so the floor must guarantee that support or registry skills never
 #          reach Codex agents.
-MIN_CORE = (0, 1, 12)
+# 0.1.14 — `github_auth token --repo <origin_url>` support. push-and-pr.sh mints
+#          an OWNER-SCOPED gh token via that option; on an older core the option
+#          fails and the script silently falls back to the unscoped boot token,
+#          which 401s on repos owned by a different GitHub App connection. The
+#          floor must guarantee the owner-aware mint is actually available.
+MIN_CORE = (0, 1, 14)
 
 
 def _lower_bound(spec: str) -> tuple[int, int, int]:
@@ -28,8 +33,9 @@ def test_requirements_pins_core_with_github_auth():
         ln for ln in txt.splitlines() if ln.strip().startswith("superpos-agent-core")
     )
     assert _lower_bound(line) >= MIN_CORE, (
-        "requirements.txt must require superpos-agent-core>=0.1.12 "
-        "(entrypoint.sh depends on superpos_agent_core.github_auth and "
+        "requirements.txt must require superpos-agent-core>=0.1.14 "
+        "(push-and-pr.sh depends on `github_auth token --repo`; "
+        "entrypoint.sh depends on superpos_agent_core.github_auth and "
         "module_setup --skills-dir)"
     )
 
@@ -40,7 +46,8 @@ def test_pyproject_pins_core_with_github_auth():
         ln for ln in txt.splitlines() if "superpos-agent-core" in ln and ">=" in ln
     )
     assert _lower_bound(line) >= MIN_CORE, (
-        "pyproject.toml must require superpos-agent-core>=0.1.12 "
-        "(entrypoint.sh depends on superpos_agent_core.github_auth and "
+        "pyproject.toml must require superpos-agent-core>=0.1.14 "
+        "(push-and-pr.sh depends on `github_auth token --repo`; "
+        "entrypoint.sh depends on superpos_agent_core.github_auth and "
         "module_setup --skills-dir)"
     )
