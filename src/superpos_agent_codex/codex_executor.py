@@ -426,7 +426,7 @@ class CodexExecutor(Executor):
             except Exception:
                 log.debug("Failed to set agent status to busy")
 
-        streamer = TelegramStreamer(self._gateway, req.chat_id)
+        streamer = TelegramStreamer(self._gateway, req.chat_id, thread_id=req.thread_id)
         try:
             await streamer.start()
         except Exception:
@@ -442,7 +442,7 @@ class CodexExecutor(Executor):
 
         try:
             inner_task = asyncio.create_task(self._execute_inner(req, streamer, retries))
-            self._track_chat_task(req.chat_id, inner_task)
+            self._track_chat_task(req.chat_key, inner_task)
             if req.source == "superpos" and req.superpos_task_id:
                 watcher_task = asyncio.create_task(_watch_claim_expiry())
             try:
@@ -717,7 +717,7 @@ class CodexExecutor(Executor):
         # Telegram messages resume the chat session; Superpos tasks run fresh
         resume_id = None
         if req.source == "telegram":
-            resume_id = self._sessions.get(req.chat_id)
+            resume_id = self._sessions.get(req.chat_key)
 
         effective_cwd = cwd_override or self._config.executor_working_dir
 
@@ -782,7 +782,7 @@ class CodexExecutor(Executor):
 
                         sid = self._extract_session_id(event)
                         if sid and req.source == "telegram":
-                            self._sessions.set(req.chat_id, sid)
+                            self._sessions.set(req.chat_key, sid)
 
                         text = dedup.extract_text(event)
                         if text:
@@ -912,7 +912,7 @@ class CodexExecutor(Executor):
                     continue
                 elif resume_id and attempt < retries:
                     log.warning("Session resume failed, retrying with fresh session")
-                    self._sessions.clear(req.chat_id)
+                    self._sessions.clear(req.chat_key)
                     resume_id = None
                     continue
 
