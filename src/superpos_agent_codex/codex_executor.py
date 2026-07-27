@@ -93,6 +93,23 @@ def _toml_value(value) -> str:
     return _toml_str(value)
 
 
+def _normalize_mcp_cfg(cfg: dict) -> dict:
+    """Map a module's ``headers`` field onto Codex's ``http_headers`` key.
+
+    Modules author remote-MCP auth headers under ``headers`` — the standard
+    ``.mcp.json`` convention shared with the other executors.  Codex only
+    recognizes custom HTTP headers for a URL-based server as ``http_headers``
+    in ``config.toml``; a bare ``headers`` sub-table is silently ignored, so
+    an authenticated remote MCP server would start *without* its Authorization
+    header.  Rename it here so the credential actually reaches Codex.  An
+    explicit ``http_headers`` (already Codex-native) wins and is left intact.
+    """
+    if "headers" in cfg and "http_headers" not in cfg:
+        cfg = dict(cfg)
+        cfg["http_headers"] = cfg.pop("headers")
+    return cfg
+
+
 def _render_mcp_toml(mcp_servers: dict) -> str:
     """Render ``{name: config}`` as ``[mcp_servers.<name>]`` TOML tables.
 
@@ -101,6 +118,7 @@ def _render_mcp_toml(mcp_servers: dict) -> str:
     """
     lines = [_MCP_BLOCK_BEGIN]
     for name, cfg in mcp_servers.items():
+        cfg = _normalize_mcp_cfg(cfg)
         header = f"[mcp_servers.{_toml_key(name)}]"
         lines.append(header)
         nested: dict = {}

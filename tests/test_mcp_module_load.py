@@ -24,7 +24,7 @@ the TOML contract, so it fails if the config regresses to the JSON
 ``mcpServers`` shape Codex ignores.
 """
 
-from superpos_agent_codex.codex_executor import CodexExecutor
+from superpos_agent_codex.codex_executor import CodexExecutor, _render_mcp_toml
 
 # A pre-existing config.toml as written by entrypoint.sh — the test asserts
 # _write_mcp_config preserves it rather than clobbering the whole file.
@@ -112,3 +112,56 @@ def test_mcp_module_loaded_by_codex_executor_init(
             "https://mcp.example.com/sse"
         )
         assert parsed["features"]["apps"] is False
+
+
+def test_remote_module_headers_rendered_under_http_headers():
+    """A module ``headers`` map must land under Codex's ``http_headers`` key.
+
+    Modules author remote-MCP auth headers under ``headers`` (the shared
+    ``.mcp.json`` convention).  Codex reads custom HTTP headers only from
+    ``[mcp_servers.<name>.http_headers]`` — a bare ``headers`` sub-table is
+    silently ignored, so the server would start unauthenticated.  This pins the
+    ``headers`` -> ``http_headers`` rename in ``_render_mcp_toml``.
+    """
+    mcp = {
+        "example-remote": {
+            "url": "https://mcp.example.com/sse",
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+    }
+
+    text = _render_mcp_toml(mcp)
+
+    # The Codex-native sub-table must be emitted; the ignored one must not.
+    assert "[mcp_servers.example-remote.http_headers]" in text
+    assert "[mcp_servers.example-remote.headers]" not in text
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 — string assertions suffice.
+        tomllib = None
+    if tomllib is not None:
+        server = tomllib.loads(text)["mcp_servers"]["example-remote"]
+        assert server["http_headers"]["Authorization"] == "Bearer secret-token"
+        assert "headers" not in server
+
+
+def test_explicit_http_headers_left_intact():
+    """An explicit ``http_headers`` (already Codex-native) is not disturbed."""
+    mcp = {
+        "example-remote": {
+            "url": "https://mcp.example.com/sse",
+            "http_headers": {"Authorization": "Bearer keep-me"},
+        }
+    }
+
+    text = _render_mcp_toml(mcp)
+
+    assert "[mcp_servers.example-remote.http_headers]" in text
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+    if tomllib is not None:
+        server = tomllib.loads(text)["mcp_servers"]["example-remote"]
+        assert server["http_headers"]["Authorization"] == "Bearer keep-me"
