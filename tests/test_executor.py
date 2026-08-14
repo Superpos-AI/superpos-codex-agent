@@ -809,6 +809,51 @@ def test_dedup_tool_dedup_without_call_id():
     assert dedup.extract_tool_use(e2) is None
 
 
+# --- Persona injection into AGENTS.md ---
+
+def _inject(mock_config, mock_runtime, mock_superpos, mock_gateway, persona):
+    """Build an executor with `persona`; its __init__ writes AGENTS.md."""
+    return CodexExecutor(
+        mock_config, mock_runtime, mock_superpos, mock_gateway, persona=persona,
+    )
+
+
+def test_persona_reinjection_replaces_block(
+    tmp_path, mock_config, mock_runtime, mock_superpos, mock_gateway,
+):
+    mock_config.executor_working_dir = str(tmp_path)
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("# Modules\n\nmodule docs here\n")
+
+    _inject(mock_config, mock_runtime, mock_superpos, mock_gateway, "persona v1")
+    _inject(mock_config, mock_runtime, mock_superpos, mock_gateway, "persona v2")
+
+    content = agents_md.read_text()
+    assert content.count("<!-- PERSONA:BEGIN -->") == 1
+    assert "persona v1" not in content
+    assert "persona v2" in content
+    assert "module docs here" in content
+
+
+def test_persona_with_backslashes_reinjects_verbatim(
+    tmp_path, mock_config, mock_runtime, mock_superpos, mock_gateway,
+):
+    """Backslashes must not be parsed as re.sub template escapes.
+
+    A persona carrying a PHP namespace (`App\\Models\\Subscription`) used to
+    crash re-injection with `re.error: bad escape \\M`, restart-looping the
+    agent on every start after the first.
+    """
+    mock_config.executor_working_dir = str(tmp_path)
+    agents_md = tmp_path / "AGENTS.md"
+    persona = r"Watch for `App\Models\Subscription`; group \1 and \g<0> too."
+
+    _inject(mock_config, mock_runtime, mock_superpos, mock_gateway, "old persona")
+    _inject(mock_config, mock_runtime, mock_superpos, mock_gateway, persona)
+
+    assert persona in agents_md.read_text()
+
+
 # --- Helpers ---
 
 class _AsyncLineIter:

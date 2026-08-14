@@ -97,9 +97,13 @@ class CodexExecutor(Executor):
             f"{_PERSONA_END}\n\n"
         )
         if _PERSONA_BEGIN in existing:
+            # The replacement must be a function: as a string, `re.sub` would
+            # parse backslashes in the persona as template escapes (`\1`,
+            # `\g<n>`), and any other sequence — e.g. a PHP namespace like
+            # `App\Models\Subscription` — raises `re.error: bad escape`.
             existing = re.sub(
                 r"<!-- PERSONA:BEGIN -->.*?<!-- PERSONA:END -->\n*",
-                persona_block,
+                lambda _: persona_block,
                 existing,
                 flags=re.DOTALL,
             )
