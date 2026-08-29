@@ -48,6 +48,103 @@ _MAX_PROMPT = 500_000  # 500KB safe limit
 _PERSONA_BEGIN = "<!-- PERSONA:BEGIN -->"
 _PERSONA_END = "<!-- PERSONA:END -->"
 
+# Codex reads MCP servers from ``~/.codex/config.toml`` under ``[mcp_servers.*]``
+# tables (transport chosen by ``command`` -> stdio vs ``url`` -> streamable HTTP).
+# We merge our generated tables into that file between these markers so the rest
+# of the config (written by entrypoint.sh: ``[features]``, ``[plugins...]``) is
+# preserved and re-running is idempotent.
+_MCP_BLOCK_BEGIN = "# --- superpos: mcp_servers (auto-generated, do not edit) ---"
+_MCP_BLOCK_END = "# --- end superpos: mcp_servers ---"
+
+_TOML_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_str(value) -> str:
+    """Render a value as a TOML basic string with the required escapes."""
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def _toml_key(key) -> str:
+    """Render a TOML key, quoting it when it is not a bare key."""
+    key = str(key)
+    return key if _TOML_BARE_KEY.match(key) else _toml_str(key)
+
+
+def _toml_value(value) -> str:
+    """Render a scalar / list / inline-table value as TOML."""
+    # bool must precede int — bool is a subclass of int.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        body = ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items())
+        return "{" + body + "}"
+    return _toml_str(value)
+
+
+def _normalize_mcp_cfg(cfg: dict) -> dict:
+    """Map a module's ``headers`` field onto Codex's ``http_headers`` key.
+
+    Modules author remote-MCP auth headers under ``headers`` — the standard
+    ``.mcp.json`` convention shared with the other executors.  Codex only
+    recognizes custom HTTP headers for a URL-based server as ``http_headers``
+    in ``config.toml``; a bare ``headers`` sub-table is silently ignored, so
+    an authenticated remote MCP server would start *without* its Authorization
+    header.  Rename it here so the credential actually reaches Codex.  An
+    explicit ``http_headers`` (already Codex-native) wins and is left intact.
+    """
+    if "headers" in cfg and "http_headers" not in cfg:
+        cfg = dict(cfg)
+        cfg["http_headers"] = cfg.pop("headers")
+    return cfg
+
+
+def _render_mcp_toml(mcp_servers: dict) -> str:
+    """Render ``{name: config}`` as ``[mcp_servers.<name>]`` TOML tables.
+
+    Scalars/lists are emitted as inline keys; a nested dict (e.g.
+    ``http_headers``) becomes a ``[mcp_servers.<name>.<key>]`` sub-table.
+    """
+    lines = [_MCP_BLOCK_BEGIN]
+    for name, cfg in mcp_servers.items():
+        cfg = _normalize_mcp_cfg(cfg)
+        header = f"[mcp_servers.{_toml_key(name)}]"
+        lines.append(header)
+        nested: dict = {}
+        for key, value in cfg.items():
+            if isinstance(value, dict):
+                nested[key] = value
+            else:
+                lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        for key, value in nested.items():
+            lines.append(f"[mcp_servers.{_toml_key(name)}.{_toml_key(key)}]")
+            for sub_key, sub_value in value.items():
+                lines.append(f"{_toml_key(sub_key)} = {_toml_value(sub_value)}")
+    lines.append(_MCP_BLOCK_END)
+    return "\n".join(lines) + "\n"
+
+
+def _strip_mcp_block(text: str) -> str:
+    """Remove a previously generated mcp_servers block (idempotency)."""
+    if _MCP_BLOCK_BEGIN not in text:
+        return text
+    pattern = re.compile(
+        re.escape(_MCP_BLOCK_BEGIN) + r".*?" + re.escape(_MCP_BLOCK_END) + r"\n?",
+        re.DOTALL,
+    )
+    return pattern.sub("", text)
+
 
 class CodexExecutor(Executor):
     """Concrete executor that drives OpenAI's Codex CLI via subprocess."""
@@ -116,17 +213,26 @@ class CodexExecutor(Executor):
 
     @staticmethod
     def _write_mcp_config(mcp_servers: dict) -> None:
-        """Write MCP server configuration to ~/.codex/config.json."""
-        config_path = Path.home() / ".codex" / "config.json"
+        """Merge MCP server definitions into ``~/.codex/config.toml``.
+
+        Codex loads MCP servers from ``config.toml`` under ``[mcp_servers.*]``
+        tables — NOT from ``config.json``.  We append the generated tables
+        between marker comments so the config written by ``entrypoint.sh``
+        (``[features]``, ``[plugins...]``) is preserved and re-running is
+        idempotent.
+        """
+        config_path = Path.home() / ".codex" / "config.toml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        existing: dict = {}
+        existing = ""
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        existing["mcpServers"] = mcp_servers
-        config_path.write_text(json.dumps(existing, indent=2))
+                existing = config_path.read_text()
+            except OSError:
+                existing = ""
+        existing = _strip_mcp_block(existing)
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        config_path.write_text(existing + _render_mcp_toml(mcp_servers))
 
     # ── Abstract method impls ──────────────────────────────────────────────
 
